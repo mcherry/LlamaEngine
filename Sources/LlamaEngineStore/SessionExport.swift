@@ -1,0 +1,30 @@
+import Foundation
+import LlamaEngine
+
+public extension ChatSession {
+    /// Builds a `Sendable` export snapshot of this session for `SessionExporter`
+    /// (system turns omitted), so callers don't hand-map `@Model` fields into
+    /// `SessionExporter.Session`.
+    func exportSnapshot() -> SessionExporter.Session {
+        SessionExporter.Session(
+            title: title,
+            backend: backend.label,
+            model: modelName,
+            contextSize: contextSize,
+            systemPrompt: systemPrompt,
+            createdAt: createdAt,
+            turns: orderedMessages
+                .filter { $0.role != .system }
+                .map { message in
+                    SessionExporter.Turn(role: message.role.rawValue,
+                                         content: message.content,
+                                         thinking: message.thinking,
+                                         createdAt: message.createdAt,
+                                         promptTokens: message.promptTokens,
+                                         evalTokens: message.evalTokens,
+                                         generationSeconds: message.generationSeconds,
+                                         firstTokenSeconds: message.firstTokenSeconds)
+                }
+        )
+    }
+}

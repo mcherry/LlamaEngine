@@ -11,18 +11,12 @@ let package = Package(
         .library(name: "LlamaEngine", targets: ["LlamaEngine"]),
         // Batteries-included SwiftData store + the persisting conversation controller.
         .library(name: "LlamaEngineStore", targets: ["LlamaEngineStore"]),
-        // Reusable SwiftUI screens + rendering views.
-        .library(name: "LlamaEngineUI", targets: ["LlamaEngineUI"]),
     ],
     targets: [
         .target(name: "LlamaEngine"),
         .target(
             name: "LlamaEngineStore",
             dependencies: ["LlamaEngine"]
-        ),
-        .target(
-            name: "LlamaEngineUI",
-            dependencies: ["LlamaEngine", "LlamaEngineStore"]
         ),
         .testTarget(
             name: "LlamaEngineTests",

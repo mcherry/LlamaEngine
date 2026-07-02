@@ -477,12 +477,12 @@ public final class ConversationController {
         return VisionResult(description: descriptionText.isEmpty ? nil : descriptionText, nativeImages: [])
     }
 
-    /// Names of the session's models known to support vision (populated by the UI on
-    /// load). Lets the view model choose native vs. preprocessor paths.
+    /// Names of the session's models known to support vision (populated by
+    /// `loadVisionCapabilities`). Lets the controller choose native vs. preprocessor paths.
     public var availableVisionModelNames: Set<String> = []
 
-    /// Trained context length per Ollama model name (from `/api/show`, populated by the
-    /// UI). Lets budgeting and `num_ctx` respect the model's real limit.
+    /// Trained context length per Ollama model name (from `/api/show`, populated by
+    /// `loadModelContextLength`). Lets budgeting and `num_ctx` respect the model's real limit.
     public var modelContextLengths: [String: Int] = [:]
 
     /// The effective context window for this session: the user's chosen size, capped to
@@ -494,6 +494,30 @@ public final class ConversationController {
             return session.contextSize
         }
         return min(session.contextSize, maxLen)
+    }
+
+    /// Loads which server models support vision into `availableVisionModelNames`, so the
+    /// controller can choose the native-vision vs. preprocessor path when an image is
+    /// attached. Silent no-op without a reachable client. Callers inject the client so
+    /// the controller stays configuration-free.
+    public func loadVisionCapabilities(client: OllamaClient?) async {
+        guard let client else { return }
+        if let models = try? await client.models() {
+            availableVisionModelNames = Set(models.filter(\.supportsVision).map(\.name))
+        }
+    }
+
+    /// Looks up the session model's trained context length (`/api/show`) into
+    /// `modelContextLengths`, so budgeting and `num_ctx` respect the model's real limit
+    /// instead of the user's raw preset. Skips backends other than Ollama, unnamed models,
+    /// already-cached lookups, and unreachable clients.
+    public func loadModelContextLength(for session: ChatSession, client: OllamaClient?) async {
+        guard session.backend == .ollama, !session.modelName.isEmpty,
+              modelContextLengths[session.modelName] == nil,
+              let client else { return }
+        if let length = try? await client.modelContextLength(session.modelName), length > 0 {
+            modelContextLengths[session.modelName] = length
+        }
     }
 
     // MARK: - Conversation history management
