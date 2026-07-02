@@ -30,7 +30,7 @@ let package = Package(
         ),
         .testTarget(
             name: "LlamaEngineStoreTests",
-            dependencies: ["LlamaEngineStore"]
+            dependencies: ["LlamaEngineStore", "LlamaEngine"]
         ),
     ],
     swiftLanguageModes: [.v6]
