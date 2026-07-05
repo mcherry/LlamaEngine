@@ -36,6 +36,23 @@ extension ComfyWorkflowTemplate {
                   let source = link.first as? String else { return nil }
             return source
         }
+        /// The model-filename input on a loader node (`ckpt_name`/`unet_name`/…), else `nil`.
+        func modelFileInput(_ id: String) -> String? {
+            let ins = inputs(id)
+            return modelInputNames.first { ins[$0] != nil }
+        }
+        /// Walks the `model` chain from `start` through any model-patch nodes (ModelSampling*,
+        /// LoraLoader, …) to the loader that actually names a file. Loaders don't have a `model`
+        /// input, so the walk terminates there; the `visited` guard stops cycles.
+        func resolveModelLoader(from start: String?) -> (node: String, input: String)? {
+            var current = start
+            var visited = Set<String>()
+            while let id = current, visited.insert(id).inserted {
+                if let input = modelFileInput(id) { return (id, input) }
+                current = linkedNode(id, "model")
+            }
+            return nil
+        }
 
         // Anchor on the sampler (first matching type, deterministic by sorted id).
         guard let sampler = root.keys.sorted().first(where: { samplerTypes.contains(classType($0) ?? "") })
@@ -67,12 +84,10 @@ extension ComfyWorkflowTemplate {
             bind(.height, latent, "height", .int)
         }
 
-        // Model: the loader feeding the sampler's `model` input.
-        if let model = linkedNode(sampler, "model") {
-            let modelInputs = inputs(model)
-            if let input = modelInputNames.first(where: { modelInputs[$0] != nil }) {
-                bind(.model, model, input, .string)
-            }
+        // Model: walk from the sampler's `model` input through any model-patch nodes
+        // (ModelSamplingAuraFlow, LoraLoader, …) to the loader that names a checkpoint/UNet.
+        if let loader = resolveModelLoader(from: linkedNode(sampler, "model")) {
+            bind(.model, loader.node, loader.input, .string)
         }
 
         return params
