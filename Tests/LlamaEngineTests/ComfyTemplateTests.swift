@@ -113,4 +113,16 @@ final class ComfyTemplateTests: XCTestCase {
         XCTAssertEqual(decoded.parameter(.prompt)?.nodeID, "6")
         XCTAssertEqual(decoded.parameters.count, 9)
     }
+
+    // MARK: - Authored defaults (seed a host's controls from the template)
+
+    func testTemplateAuthoredDefaults() {
+        let template = Self.sampleTemplate()
+        XCTAssertEqual(template.defaultInt(.steps), 20)
+        XCTAssertEqual(template.defaultDouble(.cfg), 7.0)
+        XCTAssertEqual(template.defaultInt(.width), 512)
+        XCTAssertEqual(template.defaultString(.model), "base.safetensors")
+        XCTAssertEqual(template.defaultString(.sampler), "euler")
+        XCTAssertNil(template.defaultInt(.batchSize))       // unbound role → no default
+    }
 }

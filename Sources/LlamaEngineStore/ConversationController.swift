@@ -264,6 +264,11 @@ public final class ConversationController {
         errorMessage = nil
         contextInfo = nil
 
+        // ComfyUI's template carries its own sampler (an exact server sampler_name like
+        // "res_multistep"); don't let the app's Easy-Diffusion sampler enum override it.
+        var request = request
+        if ImageBackendKind(rawValue: backendKindRaw) == .comfyUI { request.sampler = "" }
+
         let userMessage = ChatMessage(role: .user, content: request.prompt)
         userMessage.session = session
         modelContext.insert(userMessage)

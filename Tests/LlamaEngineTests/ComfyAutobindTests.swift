@@ -126,4 +126,13 @@ final class ComfyAutobindTests: XCTestCase {
         XCTAssertEqual(binding(params, .seed)?.nodeID, "57:3")
         XCTAssertEqual(binding(params, .sampler)?.input, "sampler_name")
     }
+
+    func testAutoboundZImageTurboCarriesAuthoredDefaults() {
+        // Selecting this template should seed a host's controls to the turbo model's real defaults.
+        let template = ComfyWorkflowTemplate.autobound(name: "Z-Image Turbo", workflowJSON: Self.zImageTurboGraph)
+        XCTAssertEqual(template.defaultInt(.steps), 8)
+        XCTAssertEqual(template.defaultDouble(.cfg), 1.0)
+        XCTAssertEqual(template.defaultInt(.width), 1024)
+        XCTAssertEqual(template.defaultString(.model), "z_image_turbo_bf16.safetensors")
+    }
 }

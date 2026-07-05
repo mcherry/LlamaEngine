@@ -131,6 +131,36 @@ public struct ComfyWorkflowTemplate: Codable, Sendable, Hashable, Identifiable {
         return node["class_type"] as? String
     }
 
+    /// The value the workflow authored for a bound role (e.g. the template's own steps/cfg/model),
+    /// so a host can seed its controls to the template's sensible defaults instead of clobbering them.
+    /// `nil` if the role isn't bound or the value can't be read.
+    public func authoredValue(_ key: ComfyParameterKey) -> Any? {
+        guard let parameter = parameter(key),
+              let root = try? JSONSerialization.jsonObject(with: workflowJSON) as? [String: Any],
+              let node = root[parameter.nodeID] as? [String: Any],
+              let inputs = node["inputs"] as? [String: Any] else { return nil }
+        return inputs[parameter.input]
+    }
+
+    /// The authored integer default for a bound role (e.g. `.steps`, `.width`), else `nil`.
+    public func defaultInt(_ key: ComfyParameterKey) -> Int? {
+        if let value = authoredValue(key) as? Int { return value }
+        if let value = authoredValue(key) as? Double { return Int(value) }
+        return nil
+    }
+
+    /// The authored floating-point default for a bound role (e.g. `.cfg`, `.denoise`), else `nil`.
+    public func defaultDouble(_ key: ComfyParameterKey) -> Double? {
+        if let value = authoredValue(key) as? Double { return value }
+        if let value = authoredValue(key) as? Int { return Double(value) }
+        return nil
+    }
+
+    /// The authored string default for a bound role (e.g. `.model`, `.sampler`), else `nil`.
+    public func defaultString(_ key: ComfyParameterKey) -> String? {
+        authoredValue(key) as? String
+    }
+
     /// Maps an `ImageRequest` onto this template's bound inputs, producing the overrides to inject
     /// before running. Only bound roles are set; unbound roles — and every other node input — keep
     /// the values the template authored. Empty model/VAE/sampler selections and a `nil` seed are left
