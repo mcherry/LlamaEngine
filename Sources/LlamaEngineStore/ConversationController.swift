@@ -40,6 +40,7 @@ public final class ConversationController {
               keepAliveMinutes: Int = 5,
               imageServerURL: String = "",
               imageBackendKind: String = ImageBackendKind.easyDiffusion.rawValue,
+              imageWorkflowTemplate: ComfyWorkflowTemplate? = nil,
               modelContext: ModelContext) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, session.isConfigured else { return }
@@ -50,6 +51,7 @@ public final class ConversationController {
                           session: session,
                           serverURL: imageServerURL,
                           backendKindRaw: imageBackendKind,
+                          template: imageWorkflowTemplate,
                           modelContext: modelContext)
             return
         }
@@ -197,6 +199,7 @@ public final class ConversationController {
                                session: ChatSession,
                                serverURL: String,
                                backendKindRaw: String,
+                               template: ComfyWorkflowTemplate?,
                                modelContext: ModelContext) {
         let request = ImageRequest(prompt: text,
                                    negativePrompt: session.imageNegativePrompt,
@@ -214,7 +217,7 @@ public final class ConversationController {
                                    faceCorrection: session.imageFaceCorrection,
                                    clipSkip: session.imageClipSkip)
         runImageGeneration(request: request, session: session, serverURL: serverURL,
-                           backendKindRaw: backendKindRaw, modelContext: modelContext)
+                           backendKindRaw: backendKindRaw, template: template, modelContext: modelContext)
     }
 
     /// Re-renders a previously generated image as a new turn, reusing its prompt and
@@ -223,6 +226,7 @@ public final class ConversationController {
                          session: ChatSession,
                          serverURL: String,
                          backendKindRaw: String,
+                         imageWorkflowTemplate: ComfyWorkflowTemplate? = nil,
                          modelContext: ModelContext) {
         guard !isStreaming, let info = message.imageGenInfo else { return }
         var request = ImageRequest(prompt: info.prompt,
@@ -242,7 +246,7 @@ public final class ConversationController {
                                    clipSkip: info.clipSkip ?? false)
         request.seed = Int.random(in: 0...Int(UInt32.max))
         runImageGeneration(request: request, session: session, serverURL: serverURL,
-                           backendKindRaw: backendKindRaw, modelContext: modelContext)
+                           backendKindRaw: backendKindRaw, template: imageWorkflowTemplate, modelContext: modelContext)
     }
 
     /// Shared image-generation flow: insert the prompt + assistant turns, render the
@@ -251,6 +255,7 @@ public final class ConversationController {
                                     session: ChatSession,
                                     serverURL: String,
                                     backendKindRaw: String,
+                                    template: ComfyWorkflowTemplate?,
                                     modelContext: ModelContext) {
         guard ImageGen.isConfigured(enabled: true, serverURL: serverURL) else {
             errorMessage = "Set an image server URL in Settings → Image Generation."
@@ -269,8 +274,11 @@ public final class ConversationController {
         modelContext.insert(assistant)
         session.updatedAt = .now
 
-        let provider = (ImageBackendKind(rawValue: backendKindRaw) ?? .easyDiffusion)
-            .makeProvider(baseURLString: serverURL)
+        let kind = ImageBackendKind(rawValue: backendKindRaw) ?? .easyDiffusion
+        // ComfyUI generates through a selected workflow template; other backends need only the URL.
+        let provider: ImageProvider = kind == .comfyUI
+            ? ComfyUIProvider(baseURLString: serverURL, template: template)
+            : kind.makeProvider(baseURLString: serverURL)
 
         isStreaming = true
         activityStatus = "Generating image…"

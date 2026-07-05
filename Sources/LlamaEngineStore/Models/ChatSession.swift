@@ -72,6 +72,9 @@ public final class ChatSession {
     public var imageFaceCorrection: String = ""
     /// Skip the last CLIP text-encoder layer.
     public var imageClipSkip: Bool = false
+    /// The chosen ComfyUI workflow template's id (its `UUID` string) when the image backend is
+    /// ComfyUI; empty means none picked. The template library itself lives app-side.
+    public var comfyTemplateID: String = ""
 
     // Text-to-speech (per chat). Voices/speed are app-level (Settings).
     public var ttsEnabled: Bool = false
