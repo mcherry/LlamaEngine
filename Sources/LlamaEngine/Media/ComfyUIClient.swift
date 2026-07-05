@@ -101,6 +101,18 @@ public actor ComfyUIClient {
         ComfyObjectInfo.parse(try await objectInfo()).comboOptions(node: nodeType, input: input) ?? []
     }
 
+    /// Pre-flight check: fetches the server's node schema and reports whether `workflow` can
+    /// run on it as-is — flagging missing custom nodes or model files (e.g. a checkpoint the
+    /// template references that isn't downloaded). Read-only; nothing is queued. Use it to warn
+    /// before running a template. An empty result means the workflow looks runnable.
+    public func validate(workflow: Data) async throws -> [ComfyValidationIssue] {
+        let info = ComfyObjectInfo.parse(try await objectInfo())
+        guard !info.nodes.isEmpty else {
+            throw ComfyError.failed("Couldn't read the server's node schema to validate the workflow.")
+        }
+        return try ComfyWorkflowValidator.validate(workflow: workflow, against: info)
+    }
+
     /// Uploads an input image (`POST /upload/image`) and returns the filename to reference in
     /// a `LoadImage` node's `image` input (prefixed with its subfolder when present).
     public func uploadImage(_ data: Data, filename: String) async throws -> String {

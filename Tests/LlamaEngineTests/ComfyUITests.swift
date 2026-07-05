@@ -111,4 +111,79 @@ final class ComfyUITests: XCTestCase {
         XCTAssertNil(ComfyUIClient(baseURLString: "not a url"))
         XCTAssertNotNil(ComfyUIClient(baseURLString: "http://localhost:8188"))
     }
+
+    // MARK: - ComfyWorkflowValidator (pre-flight against a server schema)
+
+    /// A small server schema: two model loaders (combo inputs) and a sampler (combos + typed
+    /// inputs + graph connections) — enough to exercise every validation branch.
+    static func sampleInfo() -> ComfyObjectInfo {
+        ComfyObjectInfo.parse(Data(#"""
+        {"CheckpointLoaderSimple":{"input":{"required":{"ckpt_name":[["sd_xl_base.safetensors","zimage_turbo.safetensors"]]}}},
+         "VAELoader":{"input":{"required":{"vae_name":[["vae-ft-mse.safetensors"]]}}},
+         "KSampler":{"input":{"required":{
+            "seed":["INT",{"default":0}],"steps":["INT",{"default":20}],"cfg":["FLOAT",{"default":7.0}],
+            "sampler_name":[["euler","dpmpp_2m"]],"scheduler":[["normal","karras"]],
+            "model":["MODEL"],"positive":["CONDITIONING"],"negative":["CONDITIONING"],"latent_image":["LATENT"]}}}}
+        """#.utf8))
+    }
+
+    func testValidateCleanWorkflowHasNoIssues() throws {
+        let workflow = Data(#"""
+        {"4":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"zimage_turbo.safetensors"}},
+         "3":{"class_type":"KSampler","inputs":{"seed":123,"steps":8,"cfg":1.5,
+              "sampler_name":"euler","scheduler":"normal",
+              "model":["4",0],"positive":["6",0],"negative":["7",0],"latent_image":["5",0]}}}
+        """#.utf8)
+        XCTAssertTrue(try ComfyWorkflowValidator.validate(workflow: workflow, against: Self.sampleInfo()).isEmpty)
+    }
+
+    func testValidateFlagsMissingModelsAcrossCombos() throws {
+        let workflow = Data(#"""
+        {"4":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"missing.safetensors"}},
+         "3":{"class_type":"KSampler","inputs":{"seed":1,"steps":8,"cfg":1.5,
+              "sampler_name":"lcm","scheduler":"normal","model":["4",0]}}}
+        """#.utf8)
+        let issues = try ComfyWorkflowValidator.validate(workflow: workflow, against: Self.sampleInfo())
+        XCTAssertEqual(issues.count, 2)
+        XCTAssertTrue(issues.allSatisfy { $0.isBlocking })
+        XCTAssertTrue(issues.contains {
+            $0.classType == "CheckpointLoaderSimple" && $0.kind == .missingModel(input: "ckpt_name", value: "missing.safetensors")
+        })
+        XCTAssertTrue(issues.contains { $0.kind == .missingModel(input: "sampler_name", value: "lcm") })
+    }
+
+    func testValidateFlagsMissingNodeType() throws {
+        let workflow = Data(#"{"9":{"class_type":"ReActorFaceSwap","inputs":{"swap_model":"inswapper_128.onnx"}}}"#.utf8)
+        let issues = try ComfyWorkflowValidator.validate(workflow: workflow, against: Self.sampleInfo())
+        XCTAssertEqual(issues.count, 1)                       // missing node stops input inspection
+        XCTAssertEqual(issues.first?.kind, .missingNodeType)
+        XCTAssertEqual(issues.first?.classType, "ReActorFaceSwap")
+        XCTAssertEqual(issues.first?.isBlocking, true)
+    }
+
+    func testValidateUnknownInputIsAdvisory() throws {
+        let workflow = Data(#"{"3":{"class_type":"KSampler","inputs":{"seed":1,"bogus":"x"}}}"#.utf8)
+        let issues = try ComfyWorkflowValidator.validate(workflow: workflow, against: Self.sampleInfo())
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues.first?.kind, .unknownInput("bogus"))
+        XCTAssertEqual(issues.first?.isBlocking, false)        // advisory, not fatal
+    }
+
+    func testValidatorSkipsConnectionsAndNumbers() throws {
+        // Values as they arrive from JSONSerialization (NSNumber, arrays), not Swift literals.
+        let node = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(#"""
+        {"inputs":{"model":["4",0],"seed":20,"flag":true,"name":"euler"}}
+        """#.utf8)) as? [String: Any])
+        let inputs = try XCTUnwrap(node["inputs"] as? [String: Any])
+        XCTAssertTrue(ComfyWorkflowValidator.isConnection(try XCTUnwrap(inputs["model"])))
+        XCTAssertFalse(ComfyWorkflowValidator.isConnection(try XCTUnwrap(inputs["seed"])))
+        XCTAssertNil(ComfyWorkflowValidator.comboString(try XCTUnwrap(inputs["seed"])))
+        XCTAssertNil(ComfyWorkflowValidator.comboString(try XCTUnwrap(inputs["flag"])))
+        XCTAssertEqual(ComfyWorkflowValidator.comboString(try XCTUnwrap(inputs["name"])), "euler")
+    }
+
+    func testValidateRejectsNonObjectWorkflow() {
+        XCTAssertThrowsError(try ComfyWorkflowValidator.validate(workflow: Data("[]".utf8),
+                                                                 against: Self.sampleInfo()))
+    }
 }
