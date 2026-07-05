@@ -60,6 +60,18 @@ public final class ChatSession {
     public var imageNegativePrompt: String = ""
     public var imageSeed: Int?
     public var imageVAE: String = ""
+    /// Sampling algorithm (`sampler_name`). See `ImageSampler`.
+    public var imageSampler: String = "euler_a"
+    /// Post-generation upscaler, or empty for none. See `ImageUpscaler`.
+    public var imageUpscaler: String = ""
+    /// Upscale factor (2 or 4) when an upscaler is set.
+    public var imageUpscaleAmount: Int = 4
+    /// Steps for the latent upscaler (only used when the latent upscaler is chosen).
+    public var imageLatentUpscalerSteps: Int = 10
+    /// Face-restoration model, or empty for none. See `FaceCorrection`.
+    public var imageFaceCorrection: String = ""
+    /// Skip the last CLIP text-encoder layer.
+    public var imageClipSkip: Bool = false
 
     // Text-to-speech (per chat). Voices/speed are app-level (Settings).
     public var ttsEnabled: Bool = false

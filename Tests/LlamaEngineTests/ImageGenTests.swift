@@ -78,4 +78,60 @@ final class ImageGenTests: XCTestCase {
     func testParseStreamPending() {
         XCTAssertEqual(EasyDiffusionProvider.parseStream(#"{"step":3,"total_steps":10}"#), .pending)
     }
+
+    // MARK: - Option enums map to the server's expected raw values
+
+    func testOptionRawValues() {
+        XCTAssertEqual(ImageSampler.dpmppSDE.rawValue, "dpmpp_sde")
+        XCTAssertEqual(ImageSampler.dpmpp2m.rawValue, "dpmpp_2m")
+        XCTAssertEqual(ImageSampler.eulerA.rawValue, "euler_a")
+        XCTAssertEqual(ImageUpscaler.none.rawValue, "")
+        XCTAssertEqual(ImageUpscaler.latent.rawValue, "latent_upscaler")
+        XCTAssertEqual(ImageUpscaler.realEsrgan4x.rawValue, "RealESRGAN_x4plus")
+        XCTAssertEqual(FaceCorrection.none.rawValue, "")
+        XCTAssertEqual(FaceCorrection.gfpgan.rawValue, "GFPGANv1.4")
+    }
+
+    // MARK: - ImageGenInfo carries the new parameters and stays back-compatible
+
+    func testImageGenInfoCapturesNewParameters() {
+        let request = ImageRequest(prompt: "a cat", negativePrompt: "", model: "realvisxl",
+                                   steps: 30, width: 1024, height: 1024, cfgScale: 5, vae: "sdxl-vae",
+                                   seed: 7, sampler: "dpmpp_sde", upscaler: "latent_upscaler",
+                                   upscaleAmount: 2, latentUpscalerSteps: 12,
+                                   faceCorrection: "CodeFormer", clipSkip: true)
+        let info = ImageGenInfo(request)
+        XCTAssertEqual(info.sampler, "dpmpp_sde")
+        XCTAssertEqual(info.upscaler, "latent_upscaler")
+        XCTAssertEqual(info.upscaleAmount, 2)
+        XCTAssertEqual(info.latentUpscalerSteps, 12)
+        XCTAssertEqual(info.faceCorrection, "CodeFormer")
+        XCTAssertEqual(info.clipSkip, true)
+    }
+
+    func testImageGenInfoRoundTrips() throws {
+        let request = ImageRequest(prompt: "p", negativePrompt: "n", model: "m", steps: 20,
+                                   width: 512, height: 512, cfgScale: 7, vae: "", seed: nil,
+                                   sampler: "dpmpp_2m", upscaler: "RealESRGAN_x4plus", upscaleAmount: 4,
+                                   latentUpscalerSteps: 10, faceCorrection: "", clipSkip: false)
+        let data = try JSONEncoder().encode(ImageGenInfo(request))
+        let decoded = try JSONDecoder().decode(ImageGenInfo.self, from: data)
+        XCTAssertEqual(decoded.sampler, "dpmpp_2m")
+        XCTAssertEqual(decoded.upscaler, "RealESRGAN_x4plus")
+        XCTAssertEqual(decoded.upscaleAmount, 4)
+    }
+
+    /// A record saved before these controls existed (no new keys) must still decode,
+    /// with the new fields coming back as `nil`.
+    func testImageGenInfoDecodesLegacyRecordWithoutNewKeys() throws {
+        let legacy = """
+        {"prompt":"old","negativePrompt":"","model":"sd-v1-5","width":512,"height":512,
+         "steps":25,"cfgScale":7.5,"vae":""}
+        """
+        let info = try JSONDecoder().decode(ImageGenInfo.self, from: Data(legacy.utf8))
+        XCTAssertEqual(info.prompt, "old")
+        XCTAssertNil(info.sampler)
+        XCTAssertNil(info.upscaler)
+        XCTAssertNil(info.clipSkip)
+    }
 }

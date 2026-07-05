@@ -27,9 +27,23 @@ public struct ImageRequest: Sendable {
     public var vae: String
     /// Fixed seed for reproducibility, or `nil` for a fresh random one each time.
     public var seed: Int?
+    /// Sampling algorithm (`sampler_name`), e.g. `"dpmpp_sde"`. Empty falls back to the server default.
+    public var sampler: String
+    /// Post-generation upscaler model, or empty for none. See `ImageUpscaler` for the known values.
+    public var upscaler: String
+    /// Upscale factor (2 or 4), applied only when `upscaler` is set.
+    public var upscaleAmount: Int
+    /// Steps for the latent upscaler, used only when `upscaler` is the latent upscaler.
+    public var latentUpscalerSteps: Int
+    /// Face-restoration model, or empty for none. See `FaceCorrection` for the known values.
+    public var faceCorrection: String
+    /// Skip the last CLIP text-encoder layer (some models are trained expecting this).
+    public var clipSkip: Bool
 
     public init(prompt: String, negativePrompt: String, model: String, steps: Int,
-                width: Int, height: Int, cfgScale: Double, vae: String, seed: Int?) {
+                width: Int, height: Int, cfgScale: Double, vae: String, seed: Int?,
+                sampler: String = "euler_a", upscaler: String = "", upscaleAmount: Int = 4,
+                latentUpscalerSteps: Int = 10, faceCorrection: String = "", clipSkip: Bool = false) {
         self.prompt = prompt
         self.negativePrompt = negativePrompt
         self.model = model
@@ -39,6 +53,12 @@ public struct ImageRequest: Sendable {
         self.cfgScale = cfgScale
         self.vae = vae
         self.seed = seed
+        self.sampler = sampler
+        self.upscaler = upscaler
+        self.upscaleAmount = upscaleAmount
+        self.latentUpscalerSteps = latentUpscalerSteps
+        self.faceCorrection = faceCorrection
+        self.clipSkip = clipSkip
     }
 }
 
@@ -55,9 +75,18 @@ public struct ImageGenInfo: Codable, Sendable {
     public var cfgScale: Double
     public var vae: String
     public var seed: Int?
+    // Optional so images generated before these controls existed still decode (missing keys → nil).
+    public var sampler: String?
+    public var upscaler: String?
+    public var upscaleAmount: Int?
+    public var latentUpscalerSteps: Int?
+    public var faceCorrection: String?
+    public var clipSkip: Bool?
 
     public init(prompt: String, negativePrompt: String, model: String, width: Int, height: Int,
-         steps: Int, cfgScale: Double, vae: String, seed: Int?) {
+         steps: Int, cfgScale: Double, vae: String, seed: Int?,
+         sampler: String? = nil, upscaler: String? = nil, upscaleAmount: Int? = nil,
+         latentUpscalerSteps: Int? = nil, faceCorrection: String? = nil, clipSkip: Bool? = nil) {
         self.prompt = prompt
         self.negativePrompt = negativePrompt
         self.model = model
@@ -67,6 +96,12 @@ public struct ImageGenInfo: Codable, Sendable {
         self.cfgScale = cfgScale
         self.vae = vae
         self.seed = seed
+        self.sampler = sampler
+        self.upscaler = upscaler
+        self.upscaleAmount = upscaleAmount
+        self.latentUpscalerSteps = latentUpscalerSteps
+        self.faceCorrection = faceCorrection
+        self.clipSkip = clipSkip
     }
 
     /// Captures the parameters of a request that was sent.
@@ -80,6 +115,12 @@ public struct ImageGenInfo: Codable, Sendable {
         cfgScale = request.cfgScale
         vae = request.vae
         seed = request.seed
+        sampler = request.sampler
+        upscaler = request.upscaler
+        upscaleAmount = request.upscaleAmount
+        latentUpscalerSteps = request.latentUpscalerSteps
+        faceCorrection = request.faceCorrection
+        clipSkip = request.clipSkip
     }
 
     /// `"WIDTHxHEIGHT"`, for display.

@@ -49,9 +49,14 @@ struct EasyDiffusionProvider: ImageProvider {
             num_outputs: 1,
             num_inference_steps: max(1, request.steps),
             guidance_scale: request.cfgScale,
-            sampler_name: "euler_a",
+            sampler_name: request.sampler.isEmpty ? "euler_a" : request.sampler,
             use_stable_diffusion_model: model,
             use_vae_model: request.vae.isEmpty ? nil : request.vae,
+            use_upscale: request.upscaler.isEmpty ? nil : request.upscaler,
+            upscale_amount: request.upscaleAmount,
+            latent_upscaler_steps: request.latentUpscalerSteps,
+            use_face_correction: request.faceCorrection.isEmpty ? nil : request.faceCorrection,
+            clip_skip: request.clipSkip,
             output_format: "png",
             stream_progress_updates: true,
             stream_image_progress: false,
@@ -198,6 +203,11 @@ struct EasyDiffusionProvider: ImageProvider {
         let sampler_name: String
         let use_stable_diffusion_model: String
         let use_vae_model: String?
+        let use_upscale: String?
+        let upscale_amount: Int
+        let latent_upscaler_steps: Int
+        let use_face_correction: String?
+        let clip_skip: Bool
         let output_format: String
         let stream_progress_updates: Bool
         let stream_image_progress: Bool

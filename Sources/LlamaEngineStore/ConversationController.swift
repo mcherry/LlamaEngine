@@ -206,7 +206,13 @@ public final class ConversationController {
                                    height: session.imageSize,
                                    cfgScale: session.imageCFG,
                                    vae: session.imageVAE,
-                                   seed: session.imageSeed)
+                                   seed: session.imageSeed,
+                                   sampler: session.imageSampler,
+                                   upscaler: session.imageUpscaler,
+                                   upscaleAmount: session.imageUpscaleAmount,
+                                   latentUpscalerSteps: session.imageLatentUpscalerSteps,
+                                   faceCorrection: session.imageFaceCorrection,
+                                   clipSkip: session.imageClipSkip)
         runImageGeneration(request: request, session: session, serverURL: serverURL,
                            backendKindRaw: backendKindRaw, modelContext: modelContext)
     }
@@ -227,7 +233,13 @@ public final class ConversationController {
                                    height: info.height,
                                    cfgScale: info.cfgScale,
                                    vae: info.vae,
-                                   seed: nil)
+                                   seed: nil,
+                                   sampler: info.sampler ?? "euler_a",
+                                   upscaler: info.upscaler ?? "",
+                                   upscaleAmount: info.upscaleAmount ?? 4,
+                                   latentUpscalerSteps: info.latentUpscalerSteps ?? 10,
+                                   faceCorrection: info.faceCorrection ?? "",
+                                   clipSkip: info.clipSkip ?? false)
         request.seed = Int.random(in: 0...Int(UInt32.max))
         runImageGeneration(request: request, session: session, serverURL: serverURL,
                            backendKindRaw: backendKindRaw, modelContext: modelContext)
