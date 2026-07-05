@@ -326,6 +326,173 @@ public actor ComfyUIClient {
     }
 }
 
+/// A workflow discovered on a ComfyUI server, already in API format and ready for
+/// `ComfyWorkflowTemplate.autobound` — so a host can offer server workflows without a manual export.
+public struct ComfyServerWorkflow: Identifiable, Sendable, Hashable {
+    /// Where the workflow came from on the server.
+    public enum Source: String, Sendable, Hashable {
+        case history, saved, bundled
+        public var label: String {
+            switch self {
+            case .history: return "Recently run"
+            case .saved: return "Saved"
+            case .bundled: return "Built-in"
+            }
+        }
+    }
+    public let id: String
+    public let name: String
+    public let source: Source
+    /// API-format workflow JSON (a node dictionary).
+    public let apiWorkflow: Data
+
+    public init(id: String, name: String, source: Source, apiWorkflow: Data) {
+        self.id = id
+        self.name = name
+        self.source = source
+        self.apiWorkflow = apiWorkflow
+    }
+}
+
+extension ComfyUIClient {
+    /// Discovers workflows on the server as API-format templates ready to import — no manual export.
+    /// Combines recently-run workflows from `/history` (already API format), saved workflows from
+    /// `/userdata` (converted from the editor's graph format), and optionally the built-in image
+    /// templates. Graphs that need subgraph expansion are skipped. Best-effort: one source failing
+    /// doesn't fail the rest.
+    public func serverWorkflows(includeBundled: Bool = true) async -> [ComfyServerWorkflow] {
+        let info = ComfyObjectInfo.parse((try? await objectInfo()) ?? Data())
+        var result = (try? await historyWorkflows()) ?? []
+        result += await savedWorkflows(objectInfo: info)
+        if includeBundled { result += await bundledWorkflows(objectInfo: info) }
+        return result
+    }
+
+    /// Recently-run workflows from `/history`, newest first, deduped by structure (API format).
+    func historyWorkflows(limit: Int = 25) async throws -> [ComfyServerWorkflow] {
+        let data = try await getURL(path: "history",
+                                    query: [URLQueryItem(name: "max_items", value: "100")])
+        return Self.parseHistory(data, limit: limit)
+    }
+
+    /// Saved workflows from `/userdata?dir=workflows`, converted from graph format (subgraph ones skipped).
+    func savedWorkflows(objectInfo: ComfyObjectInfo) async -> [ComfyServerWorkflow] {
+        guard let listData = try? await getURL(path: "userdata", query: [
+                    URLQueryItem(name: "dir", value: "workflows"),
+                    URLQueryItem(name: "recurse", value: "true"),
+                    URLQueryItem(name: "split", value: "false")]),
+              let names = try? JSONSerialization.jsonObject(with: listData) as? [String] else { return [] }
+        var out: [ComfyServerWorkflow] = []
+        for name in names {
+            guard let uiData = try? await getUserdataFile("workflows/\(name)"),
+                  let apiData = try? ComfyGraphConverter.toAPIFormat(uiData, objectInfo: objectInfo) else { continue }
+            let label = (name as NSString).deletingPathExtension
+            out.append(ComfyServerWorkflow(id: "saved:\(name)", name: label, source: .saved, apiWorkflow: apiData))
+        }
+        return out
+    }
+
+    /// Built-in local image templates from `/templates`, converted (subgraph ones skipped).
+    func bundledWorkflows(objectInfo: ComfyObjectInfo, limit: Int = 30) async -> [ComfyServerWorkflow] {
+        guard let indexData = try? await getURL(path: "templates/index.json"),
+              let modules = try? JSONSerialization.jsonObject(with: indexData) as? [[String: Any]] else { return [] }
+        let names = modules
+            .compactMap { $0["templates"] as? [[String: Any]] }
+            .flatMap { $0 }
+            .compactMap { $0["name"] as? String }
+            .filter { $0.hasPrefix("image_") }
+        var out: [ComfyServerWorkflow] = []
+        for name in names.prefix(limit) {
+            guard let uiData = try? await getURL(path: "templates/\(name).json"),
+                  let apiData = try? ComfyGraphConverter.toAPIFormat(uiData, objectInfo: objectInfo) else { continue }
+            let label = name.replacingOccurrences(of: "image_", with: "").replacingOccurrences(of: "_", with: " ")
+            out.append(ComfyServerWorkflow(id: "bundled:\(name)", name: label, source: .bundled, apiWorkflow: apiData))
+        }
+        return out
+    }
+
+    // MARK: - Pure history parsing (testable)
+
+    /// Parses a `/history` payload into deduped, newest-first API-format workflows.
+    static func parseHistory(_ data: Data, limit: Int) -> [ComfyServerWorkflow] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        var entries: [(time: Double, id: String, workflow: [String: Any])] = []
+        for (promptID, value) in root {
+            guard let entry = value as? [String: Any],
+                  let prompt = entry["prompt"] as? [Any], prompt.count >= 3,
+                  let workflow = prompt[2] as? [String: Any], !workflow.isEmpty else { continue }
+            let extra = prompt.count >= 4 ? prompt[3] as? [String: Any] : nil
+            let time = (extra?["create_time"] as? Double) ?? 0
+            entries.append((time, promptID, workflow))
+        }
+        entries.sort { $0.time > $1.time }   // newest first
+        var out: [ComfyServerWorkflow] = []
+        var seen = Set<String>()
+        for entry in entries {
+            guard seen.insert(workflowSignature(entry.workflow)).inserted,
+                  let data = try? JSONSerialization.data(withJSONObject: entry.workflow) else { continue }
+            let name = saveImageLabel(entry.workflow) ?? "Run \(entry.id.prefix(8))"
+            out.append(ComfyServerWorkflow(id: "history:\(entry.id)", name: name, source: .history, apiWorkflow: data))
+            if out.count >= limit { break }
+        }
+        return out
+    }
+
+    /// The `filename_prefix` of a SaveImage node — a friendly label for a workflow — if present.
+    static func saveImageLabel(_ workflow: [String: Any]) -> String? {
+        for (_, node) in workflow {
+            guard let node = node as? [String: Any],
+                  (node["class_type"] as? String)?.contains("SaveImage") == true,
+                  let inputs = node["inputs"] as? [String: Any],
+                  let prefix = inputs["filename_prefix"] as? String, !prefix.isEmpty else { continue }
+            return prefix
+        }
+        return nil
+    }
+
+    /// A structural signature (sorted class types + save label) used to dedupe repeat runs.
+    static func workflowSignature(_ workflow: [String: Any]) -> String {
+        let types = workflow.values
+            .compactMap { ($0 as? [String: Any])?["class_type"] as? String }
+            .sorted()
+        return types.joined(separator: ",") + "|" + (saveImageLabel(workflow) ?? "")
+    }
+
+    // MARK: - Networking
+
+    /// GET with query items (the private `get` treats `?` as a literal path character).
+    func getURL(path: String, query: [URLQueryItem] = []) async throws -> Data {
+        guard var components = URLComponents(url: baseURL.appending(path: path),
+                                             resolvingAgainstBaseURL: false) else {
+            throw ComfyError.invalidURL
+        }
+        if !query.isEmpty { components.queryItems = query }
+        guard let url = components.url else { throw ComfyError.invalidURL }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.checkHTTP(response)
+        return data
+    }
+
+    /// GET a `/userdata/{file}` where `file` is a single URL-encoded segment (slashes become `%2F`).
+    func getUserdataFile(_ relativePath: String) async throws -> Data {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "._-")
+        let encoded = relativePath.addingPercentEncoding(withAllowedCharacters: allowed) ?? relativePath
+        let base = baseURL.absoluteString
+        let separator = base.hasSuffix("/") ? "" : "/"
+        guard let url = URL(string: "\(base)\(separator)userdata/\(encoded)") else {
+            throw ComfyError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.checkHTTP(response)
+        return data
+    }
+}
+
 private extension Data {
     mutating func appendString(_ string: String) {
         append(Data(string.utf8))

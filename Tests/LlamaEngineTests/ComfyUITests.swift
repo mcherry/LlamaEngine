@@ -186,4 +186,40 @@ final class ComfyUITests: XCTestCase {
         XCTAssertThrowsError(try ComfyWorkflowValidator.validate(workflow: Data("[]".utf8),
                                                                  against: Self.sampleInfo()))
     }
+
+    // MARK: - Server-workflow discovery (/history parsing)
+
+    func testParseHistoryDedupsLabelsAndOrders() throws {
+        let history = Data(#"""
+        {"old-run":{"prompt":[1,"old-run",
+            {"3":{"class_type":"KSampler","inputs":{"seed":1}},"9":{"class_type":"SaveImage","inputs":{"filename_prefix":"cats"}}},
+            {"create_time":1000}]},
+         "new-run":{"prompt":[2,"new-run",
+            {"3":{"class_type":"KSampler","inputs":{"seed":2}},"9":{"class_type":"SaveImage","inputs":{"filename_prefix":"cats"}}},
+            {"create_time":3000}]},
+         "other":{"prompt":[3,"other",
+            {"1":{"class_type":"UNETLoader","inputs":{}},"9":{"class_type":"SaveImage","inputs":{"filename_prefix":"dogs"}}},
+            {"create_time":2000}]}}
+        """#.utf8)
+        let result = ComfyUIClient.parseHistory(history, limit: 10)
+        // The two "cats" runs share a signature → deduped; "dogs" is distinct → 2 total.
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result.map(\.source), [.history, .history])
+        // Newest first: cats (t=3000) before dogs (t=2000).
+        XCTAssertEqual(result.first?.name, "cats")
+        XCTAssertTrue(result.contains { $0.name == "dogs" })
+        // The kept "cats" is the newest run (seed 2, not the older seed 1).
+        let workflow = try XCTUnwrap(JSONSerialization.jsonObject(with: result[0].apiWorkflow) as? [String: Any])
+        let seed = ((workflow["3"] as? [String: Any])?["inputs"] as? [String: Any])?["seed"] as? Int
+        XCTAssertEqual(seed, 2)
+    }
+
+    func testParseHistoryFallsBackToRunLabel() {
+        let history = Data(#"""
+        {"abc12345-xyz":{"prompt":[1,"abc12345-xyz",{"3":{"class_type":"KSampler","inputs":{"seed":1}}},{"create_time":1}]}}
+        """#.utf8)
+        let result = ComfyUIClient.parseHistory(history, limit: 10)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.name, "Run abc12345")   // no SaveImage → id-prefixed fallback
+    }
 }

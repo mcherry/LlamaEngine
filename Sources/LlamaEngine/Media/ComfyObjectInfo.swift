@@ -18,13 +18,34 @@ public struct ComfyObjectInfo: Sendable {
             self.options = options
             self.required = required
         }
+
+        /// Whether this input is a *widget* (a value entered on the node) rather than a *connection*
+        /// from another node. Combos and the primitive scalar types are widgets; custom types
+        /// (`MODEL`, `LATENT`, `CONDITIONING`, …) arrive over links.
+        public var isWidget: Bool {
+            if options != nil { return true }
+            switch typeName {
+            case "INT", "FLOAT", "STRING", "BOOLEAN": return true
+            default: return false
+            }
+        }
     }
 
     /// `nodeType → (inputName → spec)`.
     public var nodes: [String: [String: InputSpec]]
 
-    public init(nodes: [String: [String: InputSpec]]) {
+    /// `nodeType → input names in declared order` (`input_order`: required then optional). Used to
+    /// map a UI node's positional `widgets_values` back to named inputs. Empty if the server omitted it.
+    public var inputOrder: [String: [String]]
+
+    public init(nodes: [String: [String: InputSpec]], inputOrder: [String: [String]] = [:]) {
         self.nodes = nodes
+        self.inputOrder = inputOrder
+    }
+
+    /// The declared input order for a node type (for positional widget mapping).
+    public func orderedInputNames(of nodeType: String) -> [String] {
+        inputOrder[nodeType] ?? []
     }
 
     /// The inputs declared by a node type.
@@ -50,6 +71,7 @@ public struct ComfyObjectInfo: Sendable {
             return ComfyObjectInfo(nodes: [:])
         }
         var result: [String: [String: InputSpec]] = [:]
+        var order: [String: [String]] = [:]
         for (nodeType, value) in root {
             guard let node = value as? [String: Any],
                   let input = node["input"] as? [String: Any] else { continue }
@@ -68,7 +90,17 @@ public struct ComfyObjectInfo: Sendable {
                 }
             }
             result[nodeType] = specs
+            // `input_order` (a sibling of `input`) preserves declaration order for widget mapping.
+            if let inputOrder = node["input_order"] as? [String: Any] {
+                var names: [String] = []
+                for section in ["required", "optional"] {
+                    if let arr = inputOrder[section] as? [Any] {
+                        names.append(contentsOf: arr.compactMap { $0 as? String })
+                    }
+                }
+                order[nodeType] = names
+            }
         }
-        return ComfyObjectInfo(nodes: result)
+        return ComfyObjectInfo(nodes: result, inputOrder: order)
     }
 }
