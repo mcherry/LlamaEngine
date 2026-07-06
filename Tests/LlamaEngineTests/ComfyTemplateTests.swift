@@ -20,7 +20,7 @@ final class ComfyTemplateTests: XCTestCase {
         """#.utf8)
         return ComfyWorkflowTemplate(
             id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
-            name: "Sample txt2img", kind: .textToImage, workflowJSON: workflow,
+            name: "Sample txt2img", workflowJSON: workflow,
             parameters: [
                 ComfyParameter(key: .prompt, nodeID: "6", input: "text", type: .string),
                 ComfyParameter(key: .negativePrompt, nodeID: "7", input: "text", type: .string),
@@ -109,7 +109,6 @@ final class ComfyTemplateTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ComfyWorkflowTemplate.self,
                                                from: JSONEncoder().encode(template))
         XCTAssertEqual(decoded, template)
-        XCTAssertEqual(decoded.kind, .textToImage)
         XCTAssertEqual(decoded.parameter(.prompt)?.nodeID, "6")
         XCTAssertEqual(decoded.parameters.count, 9)
     }
@@ -123,6 +122,6 @@ final class ComfyTemplateTests: XCTestCase {
         XCTAssertEqual(template.defaultInt(.width), 512)
         XCTAssertEqual(template.defaultString(.model), "base.safetensors")
         XCTAssertEqual(template.defaultString(.sampler), "euler")
-        XCTAssertNil(template.defaultInt(.batchSize))       // unbound role → no default
+        XCTAssertNil(template.defaultInt(.denoise))         // unbound role → no default
     }
 }

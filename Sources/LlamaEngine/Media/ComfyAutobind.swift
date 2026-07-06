@@ -14,11 +14,17 @@ extension ComfyWorkflowTemplate {
     /// sampler/scheduler/denoise. Only inputs that actually exist are bound; anything it can't infer
     /// is simply left unbound (the workflow's authored value stands). Non-standard graphs may bind
     /// partially — a host can let the user adjust afterward.
-    public static func autobound(name: String,
-                                 kind: ComfyWorkflowKind = .textToImage,
-                                 workflowJSON: Data) -> ComfyWorkflowTemplate {
-        ComfyWorkflowTemplate(name: name, kind: kind, workflowJSON: workflowJSON,
+    public static func autobound(name: String, workflowJSON: Data) -> ComfyWorkflowTemplate {
+        ComfyWorkflowTemplate(name: name, workflowJSON: workflowJSON,
                               parameters: detectedParameters(in: workflowJSON))
+    }
+
+    /// Auto-binds a workflow and returns it only if it's a usable **text-to-image** pipeline
+    /// (a prompt, a model, and a sampler seed were detected); otherwise `nil`. This is the gate a
+    /// host uses to accept a workflow — non-txt2img graphs (face swap, upscale, editing) are rejected.
+    public static func textToImage(name: String, workflowJSON: Data) -> ComfyWorkflowTemplate? {
+        let template = autobound(name: name, workflowJSON: workflowJSON)
+        return template.isTextToImage ? template : nil
     }
 
     /// The bindings auto-detected from an API-format workflow. Pure/testable; returns `[]` when there

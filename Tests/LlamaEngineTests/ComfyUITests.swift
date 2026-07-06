@@ -204,7 +204,6 @@ final class ComfyUITests: XCTestCase {
         let result = ComfyUIClient.parseHistory(history, limit: 10)
         // The two "cats" runs share a signature → deduped; "dogs" is distinct → 2 total.
         XCTAssertEqual(result.count, 2)
-        XCTAssertEqual(result.map(\.source), [.history, .history])
         // Newest first: cats (t=3000) before dogs (t=2000).
         XCTAssertEqual(result.first?.name, "cats")
         XCTAssertTrue(result.contains { $0.name == "dogs" })

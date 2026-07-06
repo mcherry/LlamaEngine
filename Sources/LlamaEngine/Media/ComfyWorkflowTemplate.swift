@@ -1,27 +1,5 @@
 import Foundation
 
-/// What a workflow produces and how a host drives it. Determines which affordances apply and how
-/// an `ImageRequest` maps onto the graph.
-public enum ComfyWorkflowKind: String, Codable, Sendable, Hashable, CaseIterable, Identifiable {
-    case textToImage
-    case imageToImage
-    case faceSwap
-    case upscale
-    case custom
-
-    public var id: String { rawValue }
-
-    public var label: String {
-        switch self {
-        case .textToImage: return "Text to Image"
-        case .imageToImage: return "Image to Image"
-        case .faceSwap: return "Face Swap"
-        case .upscale: return "Upscale"
-        case .custom: return "Custom"
-        }
-    }
-}
-
 /// A friendly, backend-agnostic parameter role. Binding these onto a workflow's nodes lets a host
 /// drive an arbitrary ComfyUI graph from a simple form — or straight from an `ImageRequest` — without
 /// knowing the graph's node ids (e.g. `.prompt` → node `"6"`, input `"text"`).
@@ -38,8 +16,6 @@ public enum ComfyParameterKey: String, Codable, Sendable, Hashable, CaseIterable
     case denoise
     case width
     case height
-    case batchSize
-    case inputImage
 
     public var id: String { rawValue }
 
@@ -57,8 +33,6 @@ public enum ComfyParameterKey: String, Codable, Sendable, Hashable, CaseIterable
         case .denoise: return "Denoise"
         case .width: return "Width"
         case .height: return "Height"
-        case .batchSize: return "Batch size"
-        case .inputImage: return "Input image"
         }
     }
 }
@@ -92,25 +66,23 @@ public struct ComfyParameter: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
-/// A named ComfyUI workflow plus the bindings that map friendly parameters onto its nodes.
-/// `workflowJSON` is API-format JSON (what `POST /prompt` accepts). For a `.textToImage` template
-/// the bindings let a host generate through the same `ImageRequest` path as any other image backend:
-/// pick the template and the request's prompt/seed/steps/size/model flow onto the right nodes — so a
-/// txt2img workflow behaves just like a fixed txt2img server.
+/// A named ComfyUI text-to-image workflow plus the bindings that map friendly parameters onto its
+/// nodes. `workflowJSON` is API-format JSON (what `POST /prompt` accepts). The bindings let a host
+/// generate through the same `ImageRequest` path as any other image backend: pick the template and
+/// the request's prompt/seed/steps/size/model flow onto the right nodes — so a ComfyUI txt2img
+/// workflow behaves just like a fixed txt2img server.
 public struct ComfyWorkflowTemplate: Codable, Sendable, Hashable, Identifiable {
     public var id: UUID
     public var name: String
-    public var kind: ComfyWorkflowKind
     /// API-format workflow JSON: a node dictionary `{ "6": { "class_type": …, "inputs": {…} }, … }`.
     public var workflowJSON: Data
     /// The parameter bindings — at most one per `ComfyParameterKey`.
     public var parameters: [ComfyParameter]
 
-    public init(id: UUID = UUID(), name: String, kind: ComfyWorkflowKind,
+    public init(id: UUID = UUID(), name: String,
                 workflowJSON: Data, parameters: [ComfyParameter]) {
         self.id = id
         self.name = name
-        self.kind = kind
         self.workflowJSON = workflowJSON
         self.parameters = parameters
     }
@@ -122,6 +94,13 @@ public struct ComfyWorkflowTemplate: Codable, Sendable, Hashable, Identifiable {
 
     /// The binding that selects the base model/checkpoint, if any.
     public var modelParameter: ComfyParameter? { parameter(.model) }
+
+    /// Whether this is a usable text-to-image pipeline: auto-bind found a prompt, a model, and a
+    /// sampler seed. Non-txt2img graphs (face swap, upscale, editing) fail this, so a host can filter
+    /// them out rather than offering something an `ImageRequest` can't drive.
+    public var isTextToImage: Bool {
+        parameter(.prompt) != nil && parameter(.model) != nil && parameter(.seed) != nil
+    }
 
     /// The `class_type` of a node in `workflowJSON` — e.g. to look its input's combo up in a
     /// `ComfyObjectInfo`. `nil` if the node or JSON can't be read.
@@ -180,8 +159,8 @@ public struct ComfyWorkflowTemplate: Codable, Sendable, Hashable, Identifiable {
             case .width:          inputs.set(request.width, node: node, input: input)
             case .height:         inputs.set(request.height, node: node, input: input)
             case .seed:           if let seed = request.seed { inputs.set(seed, node: node, input: input) }
-            case .scheduler, .denoise, .batchSize, .inputImage:
-                break  // not carried by ImageRequest; authored in the template (inputImage is set by the caller)
+            case .scheduler, .denoise:
+                break  // not carried by ImageRequest; the template's authored value stands
             }
         }
         return inputs

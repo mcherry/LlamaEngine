@@ -1,6 +1,6 @@
 import Foundation
 
-/// An `ImageProvider` backed by ComfyUI. Wraps a `ComfyWorkflowTemplate` (typically `.textToImage`)
+/// An `ImageProvider` backed by ComfyUI. Wraps a text-to-image `ComfyWorkflowTemplate`
 /// so selecting it drives generation through the same `ImageRequest` path as any other image backend —
 /// the template's bindings decide where the prompt/seed/steps/size/model land in the graph, so a
 /// txt2img template behaves just like a fixed txt2img server. Model listing reads the server's

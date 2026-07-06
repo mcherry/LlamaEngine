@@ -49,7 +49,6 @@ final class ComfyAutobindTests: XCTestCase {
     func testAutoboundTemplateRunsThroughInputsMapping() {
         // End-to-end: an auto-bound template maps an ImageRequest onto the right nodes.
         let template = ComfyWorkflowTemplate.autobound(name: "Z", workflowJSON: Self.standardGraph)
-        XCTAssertEqual(template.kind, .textToImage)
         let request = ImageRequest(prompt: "hello", negativePrompt: "bad", model: "zimage_turbo.safetensors",
                                    steps: 6, width: 768, height: 1024, cfgScale: 1.0, vae: "", seed: 99,
                                    sampler: "dpmpp_2m")
@@ -134,5 +133,23 @@ final class ComfyAutobindTests: XCTestCase {
         XCTAssertEqual(template.defaultDouble(.cfg), 1.0)
         XCTAssertEqual(template.defaultInt(.width), 1024)
         XCTAssertEqual(template.defaultString(.model), "z_image_turbo_bf16.safetensors")
+    }
+
+    // MARK: - Text-to-image gate
+
+    func testTextToImageGateAcceptsStandardGraph() {
+        XCTAssertNotNil(ComfyWorkflowTemplate.textToImage(name: "Z", workflowJSON: Self.standardGraph))
+        XCTAssertTrue(ComfyWorkflowTemplate.autobound(name: "Z", workflowJSON: Self.standardGraph).isTextToImage)
+        XCTAssertNotNil(ComfyWorkflowTemplate.textToImage(name: "ZT", workflowJSON: Self.zImageTurboGraph))
+    }
+
+    func testTextToImageGateRejectsNonTxt2Img() {
+        // A face-swap-style graph: no sampler, prompt, or seed → not text-to-image.
+        let graph = Data(#"""
+        {"3":{"class_type":"ReActorFaceSwap","inputs":{"swap_model":"inswapper_128.onnx"}},
+         "9":{"class_type":"SaveImage","inputs":{"images":["3",0]}}}
+        """#.utf8)
+        XCTAssertNil(ComfyWorkflowTemplate.textToImage(name: "Face Swap", workflowJSON: graph))
+        XCTAssertFalse(ComfyWorkflowTemplate.autobound(name: "Face Swap", workflowJSON: graph).isTextToImage)
     }
 }
