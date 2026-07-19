@@ -1,11 +1,13 @@
 import Foundation
 
-/// Which engine a session talks to. `ollama` is a remote Ollama server; `appleIntelligence`
+/// Which engine a session talks to. `ollama` is a remote Ollama server; `llamaServer`
+/// is a llama.cpp `llama-server` over its OpenAI-compatible API; `appleIntelligence`
 /// is Apple's on-device Foundation Models (macOS 26+, only when enabled on the system);
 /// `imageGeneration` turns prompts into images via a local image server (Settings).
 /// Stored on `ChatSession` as a raw string for SwiftData simplicity.
 public enum BackendKind: String, Codable, Sendable, CaseIterable, Identifiable {
     case ollama
+    case llamaServer
     case appleIntelligence
     case imageGeneration
 
@@ -14,6 +16,7 @@ public enum BackendKind: String, Codable, Sendable, CaseIterable, Identifiable {
     public var label: String {
         switch self {
         case .ollama: return "Ollama"
+        case .llamaServer: return "llama.cpp Server"
         case .appleIntelligence: return "Apple Intelligence"
         case .imageGeneration: return "Image Generation"
         }
@@ -22,6 +25,7 @@ public enum BackendKind: String, Codable, Sendable, CaseIterable, Identifiable {
     public var systemImage: String {
         switch self {
         case .ollama: return "server.rack"
+        case .llamaServer: return "cpu"
         case .appleIntelligence: return "apple.logo"
         case .imageGeneration: return "photo"
         }

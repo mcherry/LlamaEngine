@@ -55,14 +55,16 @@ public struct AssembledContext: Sendable {
 /// Runs the strategy ladder produced by `ContextPlanner`: it tries each strategy in
 /// order and falls through to the next on failure (e.g. the embedding endpoint is
 /// down → drop from retrieval to summarize to truncate), so it always yields
-/// *something* usable. Operates purely on `Sendable` values and `OllamaClient`.
+/// *something* usable. Operates purely on `Sendable` values and a `ServerBackend`
+/// (Ollama or llama.cpp), so it embeds and summarizes against whichever server the
+/// session uses.
 public struct ContextAssembler: Sendable {
-    public var client: OllamaClient
+    public var client: any ServerBackend
     /// The session's chat model, reused for map-reduce summarization.
     public var chatModel: String
     public var embeddingModel: String
 
-    public init(client: OllamaClient, chatModel: String, embeddingModel: String) {
+    public init(client: any ServerBackend, chatModel: String, embeddingModel: String) {
         self.client = client
         self.chatModel = chatModel
         self.embeddingModel = embeddingModel

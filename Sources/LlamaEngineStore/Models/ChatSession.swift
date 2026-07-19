@@ -160,10 +160,12 @@ public final class ChatSession {
     }
 
     /// Whether the session has enough configuration to send. Ollama needs a chosen
-    /// model; Apple Intelligence has a single on-device model, so it's always ready.
+    /// model; Apple Intelligence has a single on-device model, so it's always ready;
+    /// llama.cpp serves whichever model it was launched with, so it's ready too.
     public var isConfigured: Bool {
         switch backend {
         case .ollama: return !modelName.isEmpty
+        case .llamaServer: return true
         case .appleIntelligence: return true
         case .imageGeneration: return !imageModel.isEmpty
         }

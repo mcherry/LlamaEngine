@@ -10,6 +10,8 @@ public enum RequestInspector {
         switch backend {
         case .ollama:
             return ollamaPayload(request)
+        case .llamaServer:
+            return llamaServerPayload(request)
         case .appleIntelligence:
             return applePayload(request, options: appleOptions)
         case .imageGeneration:
@@ -20,6 +22,14 @@ public enum RequestInspector {
     /// The literal Ollama `/api/chat` body, re-serialized with sorted, pretty keys.
     private static func ollamaPayload(_ request: ChatRequest) -> String? {
         guard let data = try? OllamaClient.encodeChatBody(request),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return prettyString(object)
+    }
+
+    /// The literal llama.cpp `/v1/chat/completions` body (OpenAI-compatible),
+    /// re-serialized with sorted, pretty keys.
+    private static func llamaServerPayload(_ request: ChatRequest) -> String? {
+        guard let data = try? LlamaServerClient.encodeChatBody(request),
               let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
         return prettyString(object)
     }

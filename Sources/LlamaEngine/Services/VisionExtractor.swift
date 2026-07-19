@@ -29,12 +29,12 @@ public struct VisionDescription: Sendable {
 
 /// Runs the "eyes" step of a multi-model session: sends an image to a vision model and
 /// returns its text description, which the primary model then reasons over. A small
-/// `Sendable` helper around `OllamaClient.chat` with an image-bearing turn.
+/// `Sendable` helper around a chat backend with an image-bearing turn.
 public struct VisionExtractor: Sendable {
-    public var client: OllamaClient
+    public var client: any ChatStreaming
     public var visionModel: String
 
-    public init(client: OllamaClient, visionModel: String) {
+    public init(client: any ChatStreaming, visionModel: String) {
         self.client = client
         self.visionModel = visionModel
     }

@@ -25,16 +25,34 @@ public protocol ChatStreaming: Sendable {
     func chat(_ request: ChatRequest) -> AsyncThrowingStream<ChatChunk, Error>
 }
 
-/// Abstraction over a full Ollama-style backend. Refines `ChatStreaming` and adds the
-/// server-only capabilities (model list, version) that Apple's on-device model lacks.
+/// The embedding capability the retrieval (RAG) pipeline needs. Kept separate from
+/// `ChatStreaming` because not every chat backend can embed (Apple's on-device model
+/// can't), but every *server* backend used for retrieval does.
+public protocol EmbeddingBackend: Sendable {
+    /// Batch-embeds `input` strings, returning one vector per input, in order.
+    func embed(model: String, input: [String]) async throws -> [[Float]]
+}
+
+/// Abstraction over a full remote model server. Refines `ChatStreaming` and adds the
+/// server-only capabilities (model list, version, trained context length) that Apple's
+/// on-device model lacks. Both `OllamaClient` and `LlamaServerClient` conform.
 public protocol LLMBackend: ChatStreaming {
     func version() async throws -> String
     func models() async throws -> [OllamaModel]
+    /// The model's maximum trained context length, or `nil` if the server doesn't
+    /// report it, so the app can cap its planning window to what the model supports.
+    func modelContextLength(_ name: String) async throws -> Int?
 }
+
+/// A complete remote server backend: chat streaming, model listing, context-length
+/// lookup, *and* embeddings. This is the abstraction the conversation controller and
+/// the RAG layer thread through, so document/web retrieval works identically whether
+/// the session talks to Ollama or a llama.cpp server.
+public protocol ServerBackend: LLMBackend, EmbeddingBackend {}
 
 /// Talks to an Ollama server. A small `Sendable` value with no shared mutable
 /// state, so it is safe to pass across actor boundaries.
-public struct OllamaClient: Sendable, LLMBackend {
+public struct OllamaClient: Sendable, ServerBackend {
     var baseURL: URL
     var timeout: TimeInterval
 

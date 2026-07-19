@@ -33,7 +33,7 @@ public final class ConversationController {
     /// streaming both run in the same cancellable task.
     public func send(text: String,
               session: ChatSession,
-              client: OllamaClient?,
+              client: (any ServerBackend)?,
               embeddingModel: String,
               diagramGuidance: Bool = false,
               rightSizeContext: Bool = true,
@@ -56,11 +56,11 @@ public final class ConversationController {
             return
         }
 
-        // Resolve the chat backend up front. Ollama needs a reachable server; Apple
-        // Intelligence runs entirely on-device and needs no client.
+        // Resolve the chat backend up front. Ollama and llama.cpp both need a reachable
+        // server; Apple Intelligence runs entirely on-device and needs no client.
         let backend: ChatStreaming
         switch session.backend {
-        case .ollama:
+        case .ollama, .llamaServer:
             guard let client else {
                 errorMessage = "Invalid server URL. Check Settings."
                 return
@@ -343,7 +343,8 @@ public final class ConversationController {
                     assistant.wasTruncated = (chunk.doneReason == "length")
                     // Calibrate the token estimator against the server's real count so
                     // future budgets for this model reflect its true tokenization.
-                    if session.backend == .ollama, let actual = chunk.promptTokens {
+                    if session.backend == .ollama || session.backend == .llamaServer,
+                       let actual = chunk.promptTokens {
                         tokenCalibrator.record(model: session.modelName,
                                                rawEstimate: rawPromptEstimate,
                                                actualTokens: actual)
@@ -457,7 +458,7 @@ public final class ConversationController {
     private func assembleVision(query: String,
                                 session: ChatSession,
                                 into assistant: ChatMessage,
-                                client: OllamaClient?) async -> VisionResult {
+                                client: (any ServerBackend)?) async -> VisionResult {
         let images = session.orderedAttachments.filter(\.isImage)
         guard !images.isEmpty else { return VisionResult(description: nil, nativeImages: []) }
 
@@ -514,7 +515,7 @@ public final class ConversationController {
     /// the model's real trained limit when known. Budget planning and the request both
     /// respect this so the app never plans for room the model doesn't actually have.
     public func contextCeiling(for session: ChatSession) -> Int {
-        guard session.backend == .ollama,
+        guard session.backend == .ollama || session.backend == .llamaServer,
               let maxLen = modelContextLengths[session.modelName], maxLen > 0 else {
             return session.contextSize
         }
@@ -525,7 +526,7 @@ public final class ConversationController {
     /// controller can choose the native-vision vs. preprocessor path when an image is
     /// attached. Silent no-op without a reachable client. Callers inject the client so
     /// the controller stays configuration-free.
-    public func loadVisionCapabilities(client: OllamaClient?) async {
+    public func loadVisionCapabilities(client: (any ServerBackend)?) async {
         guard let client else { return }
         if let models = try? await client.models() {
             availableVisionModelNames = Set(models.filter(\.supportsVision).map(\.name))
@@ -536,8 +537,9 @@ public final class ConversationController {
     /// `modelContextLengths`, so budgeting and `num_ctx` respect the model's real limit
     /// instead of the user's raw preset. Skips backends other than Ollama, unnamed models,
     /// already-cached lookups, and unreachable clients.
-    public func loadModelContextLength(for session: ChatSession, client: OllamaClient?) async {
-        guard session.backend == .ollama, !session.modelName.isEmpty,
+    public func loadModelContextLength(for session: ChatSession, client: (any ServerBackend)?) async {
+        guard session.backend == .ollama || session.backend == .llamaServer,
+              !session.modelName.isEmpty,
               modelContextLengths[session.modelName] == nil,
               let client else { return }
         if let length = try? await client.modelContextLength(session.modelName), length > 0 {
@@ -556,7 +558,7 @@ public final class ConversationController {
                                  newUserText: String,
                                  contextBlock: String?,
                                  into assistant: ChatMessage,
-                                 client: OllamaClient?,
+                                 client: (any ServerBackend)?,
                                  embeddingModel: String) async -> [ChatTurn] {
         let conv = session.orderedMessages
             .filter { $0.role != .system && !$0.content.isEmpty }
@@ -612,7 +614,7 @@ public final class ConversationController {
                                   budget: Int,
                                   session: ChatSession,
                                   into assistant: ChatMessage,
-                                  client: OllamaClient) async -> [ChatTurn] {
+                                  client: any ServerBackend) async -> [ChatTurn] {
         let (older, recent) = ConversationHistory.splitRecent(conv, keepRecent: recentTurnsToKeep)
         let (keptRecent, _) = ConversationHistory.truncateToFit(recent, budget: budget)
 
@@ -658,7 +660,7 @@ public final class ConversationController {
                                  query: String,
                                  session: ChatSession,
                                  into assistant: ChatMessage,
-                                 client: OllamaClient,
+                                 client: any ServerBackend,
                                  embeddingModel: String) async -> [ChatTurn] {
         let (older, recent) = ConversationHistory.splitRecent(conv, keepRecent: recentTurnsToKeep)
         let (keptRecent, _) = ConversationHistory.truncateToFit(recent, budget: budget)
@@ -731,7 +733,7 @@ public final class ConversationController {
     }
 
     /// One-shot summary call used by rolling-summary history mode.
-    private func summarizeText(_ text: String, client: OllamaClient, model: String) async -> String? {
+    private func summarizeText(_ text: String, client: any ServerBackend, model: String) async -> String? {
         let system = "You maintain a running summary of a conversation so it can continue within a limited context window. Preserve decisions, facts, names, numbers, the user's goals, and open questions. Drop pleasantries and redundancy. Output only the updated summary."
         let request = ChatRequest(model: model,
                                   messages: [ChatTurn(role: Role.system.rawValue, content: system),
@@ -755,11 +757,11 @@ public final class ConversationController {
     private func assembleContext(query: String,
                                  session: ChatSession,
                                  into assistant: ChatMessage,
-                                 client: OllamaClient?,
+                                 client: (any ServerBackend)?,
                                  embeddingModel: String) async -> String? {
         let attachments = session.orderedAttachments.filter { !$0.isImage }
         guard !attachments.isEmpty else { return nil }
-        // Context assembly (embeddings, summarization) runs on the Ollama server. An
+        // Context assembly (embeddings, summarization) runs on the session's server. An
         // Apple-only session with no server simply sends without document context.
         guard let client else { return nil }
 
