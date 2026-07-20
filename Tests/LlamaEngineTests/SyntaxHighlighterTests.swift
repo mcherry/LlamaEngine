@@ -13,14 +13,52 @@ final class SyntaxHighlighterTests: XCTestCase {
         SyntaxHighlighter.tokens(code, language: language).first { $0.kind == kind }?.text
     }
 
-    func testUnknownLanguageIsSinglePlainToken() {
-        let tokens = SyntaxHighlighter.tokens("anything goes here", language: "fortran")
-        XCTAssertEqual(tokens, [.init(kind: .plain, text: "anything goes here")])
+    func testPlainOutputTagStaysPlain() {
+        // A deliberately-plain tag keeps fixed-width output uncolored even though it is
+        // tagged, so logs / diffs / transcripts aren't speckled with color.
+        for tag in ["text", "output", "log", "diff", "console"] {
+            let tokens = SyntaxHighlighter.tokens("let x = 42 // note", language: tag)
+            XCTAssertEqual(tokens, [.init(kind: .plain, text: "let x = 42 // note")], "tag: \(tag)")
+        }
     }
 
     func testNilLanguageIsSinglePlainToken() {
         let tokens = SyntaxHighlighter.tokens("plain text", language: nil)
         XCTAssertEqual(tokens, [.init(kind: .plain, text: "plain text")])
+    }
+
+    func testUnknownTaggedLanguageGetsGenericHighlighting() {
+        // An unrecognized but tagged language falls back to generic highlighting: universal
+        // keywords, numbers, and strings still color.
+        let code = "func greet() { val x = 42; return \"hi\" }"
+        let tokens = SyntaxHighlighter.tokens(code, language: "someobscurelang")
+        XCTAssertTrue(tokens.contains(.init(kind: .keyword, text: "func")))
+        XCTAssertTrue(tokens.contains(.init(kind: .keyword, text: "val")))
+        XCTAssertTrue(tokens.contains(.init(kind: .keyword, text: "return")))
+        XCTAssertEqual(firstText(code, "someobscurelang", .number), "42")
+        XCTAssertEqual(firstText(code, "someobscurelang", .string), "\"hi\"")
+        // The tokens must still reassemble to the exact source.
+        XCTAssertEqual(tokens.map(\.text).joined(), code)
+    }
+
+    func testGenericSniffsDominantCommentMarker() {
+        // Lines starting with ';' make it the sniffed comment marker for an unknown tag.
+        let code = "; a header comment\nfoo bar\n; another comment"
+        let comments = SyntaxHighlighter.tokens(code, language: "weirdlang")
+            .filter { $0.kind == .comment }
+        XCTAssertEqual(comments.count, 2)
+        XCTAssertEqual(comments.first?.text, "; a header comment")
+    }
+
+    func testAssemblyProfile() {
+        let code = "mov rax, 0x10 ; load\nsyscall"
+        XCTAssertTrue(kinds(code, "asm").contains(.keyword))
+        XCTAssertEqual(firstText(code, "asm", .keyword), "mov")
+        XCTAssertEqual(firstText(code, "asm", .number), "0x10")
+        XCTAssertEqual(firstText(code, "asm", .comment), "; load")
+        // Case-insensitive: uppercase mnemonics/registers still color.
+        XCTAssertTrue(SyntaxHighlighter.tokens("MOV RAX, 1", language: "nasm")
+            .contains(.init(kind: .keyword, text: "MOV")))
     }
 
     func testReassemblyPreservesSource() {

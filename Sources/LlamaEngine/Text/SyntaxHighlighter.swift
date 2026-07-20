@@ -21,7 +21,7 @@ public enum SyntaxHighlighter {
     /// Tokenizes `code` for the given language. Returns one `.plain` token spanning the
     /// whole input when the language is unknown or unspecified.
     public static func tokens(_ code: String, language: String?) -> [Token] {
-        guard let profile = profile(for: language) else {
+        guard let profile = resolvedProfile(for: language, code: code) else {
             return code.isEmpty ? [] : [Token(kind: .plain, text: code)]
         }
 
@@ -173,6 +173,54 @@ public enum SyntaxHighlighter {
         var tripleQuotes = false
     }
 
+    /// The profile to tokenize with. A specific language profile when recognized; a
+    /// generic fallback (strings, numbers, universal keywords, sniffed comments) for an
+    /// unrecognized but explicitly *tagged* language, so obscure languages still get some
+    /// color; or `nil` for untagged blocks and deliberately-plain tags (`text`, `output`,
+    /// `log`, `diff`, `mermaid`, …) so fixed-width output stays uncolored.
+    static func resolvedProfile(for language: String?, code: String) -> Profile? {
+        if let specific = profile(for: language) { return specific }
+        guard let raw = language?.lowercased().trimmingCharacters(in: .whitespaces),
+              !raw.isEmpty, !plainOutputTags.contains(raw) else { return nil }
+        return genericProfile(sniffedFrom: code)
+    }
+
+    /// Language tags that are really fixed-width output, not code — kept plain even though
+    /// they carry a tag, so logs, transcripts, and diffs aren't speckled with color.
+    static let plainOutputTags: Set<String> = [
+        "text", "plaintext", "plain", "txt", "output", "console", "log", "logs",
+        "none", "raw", "ansi", "term", "terminal", "diff", "patch", "markdown", "md", "mermaid"
+    ]
+
+    /// A conservative generic profile for an unknown language: universal keywords, common
+    /// string delimiters, a C-style block comment, and a line-comment marker *sniffed*
+    /// from the code so dialects like assembly (`;`) or shell-ish (`#`) get the right
+    /// comment style instead of a fixed guess.
+    static func genericProfile(sniffedFrom code: String) -> Profile {
+        Profile(keywords: universalKeywords,
+                lineComments: sniffedLineComments(code),
+                blockComment: ("/*", "*/"),
+                stringDelimiters: ["\"", "'"])
+    }
+
+    /// Tallies which comment markers begin lines (after indentation) and returns the
+    /// dominant one, always including `//` when present since it's near-zero
+    /// false-positive. Falls back to `//` when nothing stands out.
+    static func sniffedLineComments(_ code: String) -> [String] {
+        let candidates = ["//", "--", "#", ";", "%"]
+        var counts: [String: Int] = [:]
+        for line in code.split(whereSeparator: \.isNewline) {
+            let trimmed = line.drop { $0 == " " || $0 == "\t" }
+            if let marker = candidates.first(where: { trimmed.hasPrefix($0) }) {
+                counts[marker, default: 0] += 1
+            }
+        }
+        guard let best = counts.max(by: { $0.value < $1.value })?.key else { return ["//"] }
+        var markers = [best]
+        if best != "//", (counts["//"] ?? 0) > 0 { markers.append("//") }
+        return markers
+    }
+
     /// Resolves a language tag (incl. common aliases) to a profile, or `nil` when the
     /// language is unknown so the caller renders it as plain text.
     static func profile(for language: String?) -> Profile? {
@@ -212,6 +260,10 @@ public enum SyntaxHighlighter {
                            stringDelimiters: ["'"])
         case "bash", "sh", "zsh", "shell":
             return Profile(keywords: shellKeywords, lineComments: ["#"],
+                           stringDelimiters: ["\"", "'"])
+        case "asm", "assembly", "nasm", "masm", "gas", "x86", "x86asm", "arm", "armasm", "aarch64":
+            return Profile(keywords: assemblyKeywords, caseInsensitiveKeywords: true,
+                           lineComments: [";", "#", "//"], blockComment: ("/*", "*/"),
                            stringDelimiters: ["\"", "'"])
         default:
             return nil
@@ -288,4 +340,61 @@ public enum SyntaxHighlighter {
         "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac",
         "in", "function", "return", "break", "continue", "local", "export", "readonly",
         "echo", "then", "select", "until"]
+
+    /// A broad union of keywords common across many languages, used by the generic
+    /// fallback so an unrecognized-but-tagged language still gets keyword color.
+    private static let universalKeywords: Set<String> = [
+        "if", "else", "elif", "elsif", "for", "foreach", "while", "do", "loop", "switch",
+        "case", "default", "break", "continue", "return", "yield", "goto", "when", "then",
+        "end", "begin", "fi", "done", "esac", "until",
+        "function", "func", "def", "fn", "sub", "proc", "procedure", "lambda", "macro",
+        "class", "struct", "enum", "union", "interface", "trait", "protocol", "record",
+        "object", "module", "namespace", "package",
+        "import", "include", "require", "use", "using", "from", "as", "export", "extern",
+        "extends", "implements",
+        "public", "private", "protected", "internal", "static", "const", "final",
+        "abstract", "virtual", "override",
+        "let", "var", "val", "dim", "local", "global", "auto", "register", "volatile", "mutable",
+        "new", "delete", "sizeof", "typeof", "typedef", "type", "template",
+        "true", "false", "null", "nil", "none", "void", "undefined",
+        "self", "this", "super", "base",
+        "try", "catch", "except", "finally", "throw", "throws", "raise", "defer", "ensure", "rescue",
+        "and", "or", "not", "in", "is", "of"]
+
+    /// x86-64 and ARM mnemonics, directives, and registers for `asm`-tagged blocks.
+    /// Matched case-insensitively so `MOV`/`mov` and `RAX`/`rax` both color.
+    private static let assemblyKeywords: Set<String> = {
+        var words: Set<String> = [
+            // x86 data / arithmetic / logic
+            "mov", "movabs", "movzx", "movsx", "movsxd", "lea", "push", "pop", "xchg", "bswap",
+            "add", "adc", "sub", "sbb", "mul", "imul", "div", "idiv", "inc", "dec", "neg",
+            "and", "or", "xor", "not", "shl", "shr", "sal", "sar", "rol", "ror", "cmp", "test",
+            // x86 control flow
+            "jmp", "je", "jne", "jz", "jnz", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe",
+            "jo", "jno", "js", "jns", "jc", "jnc", "call", "ret", "leave", "enter", "loop",
+            "int", "syscall", "sysret", "nop", "hlt", "cpuid", "rdtsc", "cld", "std", "cli", "sti",
+            "cbw", "cwde", "cdqe", "cwd", "cdq", "cqo", "sete", "setne", "setg", "setl",
+            "cmove", "cmovne", "pushfq", "popfq",
+            // ARM / AArch64
+            "ldr", "ldp", "str", "stp", "ldrb", "strb", "ldrh", "strh", "adr", "adrp",
+            "b", "bl", "blr", "br", "cbz", "cbnz", "tbz", "tbnz", "movz", "movk", "movn",
+            "madd", "msub", "sdiv", "udiv", "orr", "eor", "bic", "lsl", "lsr", "asr",
+            "cmn", "tst", "ccmp", "csel", "cset", "bfi", "ubfx", "sbfx", "svc", "mrs", "msr",
+            // directives (NASM / GAS without the leading dot)
+            "section", "global", "globl", "extern", "db", "dw", "dd", "dq", "dt",
+            "resb", "resw", "resd", "resq", "equ", "times", "align", "bits", "org", "default",
+            "byte", "word", "dword", "qword", "ptr", "offset",
+            // segment / special registers
+            "rip", "eflags", "rflags", "cs", "ds", "es", "fs", "gs", "ss",
+            "sp", "lr", "pc", "xzr", "wzr", "fp", "ip",
+            // x86 named registers
+            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+            "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+            "ax", "bx", "cx", "dx", "al", "bl", "cl", "dl", "ah", "bh", "ch", "dh"]
+        for i in 8...15 { words.insert("r\(i)"); words.insert("r\(i)d"); words.insert("r\(i)b"); words.insert("r\(i)w") }
+        for i in 0...31 { words.insert("xmm\(i)"); words.insert("ymm\(i)") }
+        for i in 0...30 { words.insert("x\(i)"); words.insert("w\(i)") }
+        for i in 0...15 { words.insert("r\(i)") }
+        return words
+    }()
 }
