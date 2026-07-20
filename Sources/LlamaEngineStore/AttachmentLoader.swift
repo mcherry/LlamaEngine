@@ -142,4 +142,140 @@ public enum AttachmentLoader {
         await insertChunks(chunks, into: attachment, modelContext: modelContext, onProgress: onProgress)
         return attachment
     }
+
+    // MARK: - Directory sources
+
+    /// A `Sendable` snapshot of one indexed file: its path relative to the attached folder,
+    /// plus its chunked text.
+    private struct PreparedFile: Sendable {
+        let path: String
+        let chunks: [String]
+    }
+
+    /// The result of walking a directory off the main actor — the files worth indexing,
+    /// already chunked, and whether the caps cut the walk short.
+    private struct PreparedDirectory: Sendable {
+        let files: [PreparedFile]
+        let truncated: Bool
+    }
+
+    /// Attaches a whole folder as one retrievable source: walks the tree, skipping
+    /// dependency/build directories, binary or oversized files, and hidden entries, then
+    /// chunks each surviving text file tagged with its relative path. The walk + read +
+    /// chunk work runs off the main actor; only the `@Model` inserts happen here. Progress
+    /// is reported as a human-readable status plus a `0...1` fraction.
+    @MainActor
+    @discardableResult
+    public static func indexDirectory(at url: URL,
+                                      into session: ChatSession,
+                                      modelContext: ModelContext,
+                                      onProgress: (@MainActor (String, Double) -> Void)? = nil) async throws -> Attachment {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+        let folderName = url.lastPathComponent
+
+        onProgress?("Scanning \(folderName)…", 0)
+        // Walk, read, and chunk the whole tree off the main actor so a big repo doesn't
+        // freeze the UI while it's scanned.
+        let prepared = await Task.detached(priority: .userInitiated) {
+            scanDirectory(root: url)
+        }.value
+        guard !prepared.files.isEmpty else { throw LoaderError.empty(folderName) }
+
+        let attachment = Attachment(fileName: folderName, fullText: "")
+        attachment.fileCount = prepared.files.count
+        attachment.session = session
+        modelContext.insert(attachment)
+        await insertDirectoryChunks(prepared.files,
+                                    into: attachment,
+                                    modelContext: modelContext,
+                                    onProgress: onProgress)
+        return attachment
+    }
+
+    /// Walks `root` depth-first, applying `DirectoryFilter` in cheap-to-expensive order
+    /// (directory name, file name, size, then a binary-content sniff) and enforcing the
+    /// file-count/byte caps. Pure and `nonisolated`, so it runs on a detached task. Uses
+    /// memory-mapped reads to avoid copying large files into memory.
+    private static func scanDirectory(root: URL) -> PreparedDirectory {
+        let fileManager = FileManager.default
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
+        guard let enumerator = fileManager.enumerator(at: root,
+                                                      includingPropertiesForKeys: Array(keys),
+                                                      options: [.skipsHiddenFiles],
+                                                      errorHandler: { _, _ in true }) else {
+            return PreparedDirectory(files: [], truncated: false)
+        }
+
+        let chunker = TextChunker()
+        var files: [PreparedFile] = []
+        var totalBytes = 0
+        var truncated = false
+
+        for case let fileURL as URL in enumerator {
+            if files.count >= DirectoryFilter.maxFiles || totalBytes >= DirectoryFilter.maxTotalBytes {
+                truncated = true
+                break
+            }
+            let values = try? fileURL.resourceValues(forKeys: keys)
+
+            if values?.isDirectory == true {
+                if DirectoryFilter.shouldSkipDirectory(fileURL.lastPathComponent) {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            guard values?.isRegularFile == true else { continue }
+            if DirectoryFilter.shouldSkipFile(fileURL.lastPathComponent) { continue }
+            if let size = values?.fileSize, size > DirectoryFilter.maxFileBytes { continue }
+
+            guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe),
+                  !data.isEmpty,
+                  !DirectoryFilter.looksBinary(data),
+                  let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+
+            let chunks = chunker.chunk(text)
+            guard !chunks.isEmpty else { continue }
+            files.append(PreparedFile(path: DirectoryFilter.relativePath(of: fileURL, under: root),
+                                      chunks: chunks))
+            totalBytes += data.count
+        }
+        // Stable path order so chunk ordinals are deterministic and the assembled context
+        // reads file-by-file rather than in filesystem enumeration order.
+        return PreparedDirectory(files: files.sorted { $0.path < $1.path }, truncated: truncated)
+    }
+
+    /// Inserts every file's chunks as `DocumentChunk`s tagged with their relative path, in
+    /// batches that yield to the run loop so a large tree stays responsive, reporting a
+    /// per-file status and `0...1` progress.
+    @MainActor
+    private static func insertDirectoryChunks(_ files: [PreparedFile],
+                                              into attachment: Attachment,
+                                              modelContext: ModelContext,
+                                              onProgress: (@MainActor (String, Double) -> Void)?) async {
+        let totalChunks = files.reduce(0) { $0 + $1.chunks.count }
+        guard totalChunks > 0 else { onProgress?("", 1); return }
+        var ordinal = 0
+        var inserted = 0
+        var tokens = 0
+        for (fileIndex, file) in files.enumerated() {
+            for text in file.chunks {
+                let chunk = DocumentChunk(ordinal: ordinal, text: text)
+                chunk.filePath = file.path
+                chunk.attachment = attachment
+                modelContext.insert(chunk)
+                ordinal += 1
+                inserted += 1
+                tokens += TokenEstimator.estimate(text)
+                if inserted % 200 == 0 {
+                    onProgress?("Indexing \(attachment.fileName): \(fileIndex + 1) of \(files.count) files",
+                                Double(inserted) / Double(totalChunks))
+                    await Task.yield()
+                }
+            }
+        }
+        attachment.tokenEstimate = tokens
+        onProgress?("", 1)
+    }
 }

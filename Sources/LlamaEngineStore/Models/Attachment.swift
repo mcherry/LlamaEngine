@@ -12,6 +12,9 @@ public final class Attachment {
     public var fullText: String = ""
     /// Cached estimate so the UI can show size without re-counting.
     public var tokenEstimate: Int = 0
+    /// Number of files indexed when this attachment is a directory source; `0` for a
+    /// single file, pasted note, web page, or image.
+    public var fileCount: Int = 0
     public var createdAt: Date = Date.now
     /// Raw image bytes when this attachment is an image (else `nil`). Images are sent
     /// to vision models rather than chunked/embedded as text.
@@ -45,6 +48,10 @@ public final class Attachment {
 
     /// Whether this attachment is an image (vision input) rather than a text document.
     public var isImage: Bool { imageData != nil }
+
+    /// Whether this attachment is a directory source (many files indexed as one unit)
+    /// rather than a single file, note, or web page.
+    public var isDirectory: Bool { fileCount > 0 }
 
     /// Base64 encoding of the image, for the Ollama `images` field.
     public var imageBase64: String? {

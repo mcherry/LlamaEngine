@@ -22,6 +22,10 @@ public struct RetrievableChunk: Sendable {
         self.embedding = embedding
         self.filePath = filePath
     }
+
+    /// The label shown to the model and the user: the file path for directory sources,
+    /// otherwise the attachment name. Lets the model cite the exact file an excerpt is from.
+    public var displaySource: String { filePath ?? sourceName }
 }
 
 /// A retrieved chunk plus its relevance score, for the retrieval inspector. A plain
@@ -209,7 +213,7 @@ public struct ContextAssembler: Sendable {
         let retrieved = scored
             .filter { selectedSet.contains($0.chunk.id) }
             .map { RetrievedChunkInfo(id: $0.chunk.id,
-                                     sourceName: $0.chunk.sourceName,
+                                     sourceName: $0.chunk.displaySource,
                                      ordinal: $0.chunk.ordinal,
                                      score: $0.score,
                                      text: $0.chunk.text) }
@@ -286,11 +290,11 @@ public struct ContextAssembler: Sendable {
     // MARK: - Rendering
 
     private func render(_ chunks: [RetrievableChunk]) -> String {
-        chunks.map { "[\($0.sourceName)]\n\($0.text)" }.joined(separator: "\n\n")
+        chunks.map { "[\($0.displaySource)]\n\($0.text)" }.joined(separator: "\n\n")
     }
 
     private func labels(for chunks: [RetrievableChunk]) -> [String] {
-        Array(Set(chunks.map(\.sourceName))).sorted()
+        Array(Set(chunks.map(\.displaySource))).sorted()
     }
 
     /// Summarizes chunks with bounded concurrency, preserving input order. Keeps at

@@ -11,6 +11,10 @@ public final class DocumentChunk {
     public var text: String = ""
     /// `[Float]` packed little-endian; `nil` until the chunk has been embedded.
     public var embeddingData: Data?
+    /// Relative path within the source directory when this chunk came from a directory
+    /// attachment (e.g. `Sources/App/main.swift`); `nil` for single-file, pasted, or web
+    /// attachments. Drives path-aware lexical ranking and per-file inspector labels.
+    public var filePath: String?
 
     public var attachment: Attachment?
 

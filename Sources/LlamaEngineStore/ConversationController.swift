@@ -8,7 +8,20 @@ import SwiftData
 @MainActor
 @Observable
 public final class ConversationController {
-    public var isStreaming = false
+    public var isStreaming = false {
+        didSet {
+            // Drive a single elapsed-time clock for the whole turn: stamp the start when
+            // streaming begins and clear it when it ends, so the UI can show how long the
+            // model has been working without any of its own timer bookkeeping.
+            if isStreaming {
+                if generationStartedAt == nil { generationStartedAt = .now }
+            } else {
+                generationStartedAt = nil
+            }
+        }
+    }
+    /// When the current turn started, for the status bar's count-up timer; `nil` when idle.
+    public private(set) var generationStartedAt: Date?
     public var errorMessage: String?
     /// Set after context assembly so the UI can show which strategy was used.
     public var contextInfo: ContextInfo?
@@ -780,7 +793,8 @@ public final class ConversationController {
                                                sourceName: attachment.fileName,
                                                ordinal: ordinal,
                                                text: chunk.text,
-                                               embedding: chunk.embedding))
+                                               embedding: chunk.embedding,
+                                               filePath: chunk.filePath))
                 ordinal += 1
             }
         }
