@@ -8,7 +8,11 @@ public enum TokenEstimator {
 
     public static func estimate(_ text: String) -> Int {
         guard !text.isEmpty else { return 0 }
-        return Int((Double(text.count) / Double(charsPerToken)).rounded(.up))
+        // Count UTF-8 bytes, not `String.count`: the latter walks the whole string
+        // segmenting grapheme clusters (O(n) and slow on large sources), while byte
+        // count is far cheaper and, for the mostly-ASCII text we chunk, effectively
+        // identical. Multi-byte text counts slightly higher, which keeps budgets safe.
+        return Int((Double(text.utf8.count) / Double(charsPerToken)).rounded(.up))
     }
 
     public static func estimate(_ texts: [String]) -> Int {

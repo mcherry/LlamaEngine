@@ -28,17 +28,46 @@ public struct AppleEmbedder: EmbeddingBackend {
     /// (`search_document:` / `search_query:`) are stripped so they don't pollute the text.
     public func embed(model: String, input: [String]) async throws -> [[Float]] {
         guard !input.isEmpty else { return [] }
-        guard let embedding = NLEmbedding.sentenceEmbedding(for: .english) else {
+        guard NLEmbedding.sentenceEmbedding(for: .english) != nil else {
             throw AppleEmbedderError.unavailable
+        }
+        // Embedding each string is independent and CPU-bound. Split the input into a few
+        // contiguous batches and embed them in parallel — each task embeds its own slice
+        // serially and returns it, so there are no shared-memory writes (avoiding the ARC
+        // races of raw-pointer fan-out). This is the dominant cost when indexing a large
+        // source.
+        let batchCount = min(max(1, ProcessInfo.processInfo.activeProcessorCount), input.count)
+        guard batchCount > 1 else { return Self.embedSerially(input) }
+
+        let batchSize = (input.count + batchCount - 1) / batchCount
+        return await withTaskGroup(of: (Int, [[Float]]).self) { group in
+            for b in 0..<batchCount {
+                let start = b * batchSize
+                guard start < input.count else { continue }
+                let slice = Array(input[start..<min(start + batchSize, input.count)])
+                group.addTask { (start, Self.embedSerially(slice)) }
+            }
+            var results = [[Float]](repeating: [], count: input.count)
+            for await (start, vectors) in group {
+                for (offset, vector) in vectors.enumerated() { results[start + offset] = vector }
+            }
+            return results
+        }
+    }
+
+    /// Embeds a batch serially. `nonisolated`/`static` and self-contained so it's safe to
+    /// run on a task group's worker.
+    private static func embedSerially(_ input: [String]) -> [[Float]] {
+        guard let embedding = NLEmbedding.sentenceEmbedding(for: .english) else {
+            return [[Float]](repeating: [], count: input.count)
         }
         let dimension = embedding.dimension
         return input.map { text in
-            let clean = Self.stripTaskPrefix(text)
+            let clean = stripTaskPrefix(text)
             if let vector = embedding.vector(for: clean) {
                 return vector.map(Float.init)
             }
-            // The model returns nil for empty/degenerate text; a zero vector scores 0
-            // similarity, so such a chunk simply isn't selected.
+            // nil for empty/degenerate text; a zero vector scores 0 similarity.
             return [Float](repeating: 0, count: dimension)
         }
     }

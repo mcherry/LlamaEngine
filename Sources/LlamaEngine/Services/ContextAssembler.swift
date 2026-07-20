@@ -10,13 +10,17 @@ public struct RetrievableChunk: Sendable {
     public let ordinal: Int
     public let text: String
     public var embedding: [Float]?
+    /// Relative file path (for directory sources) used for path-aware lexical matching and
+    /// inspector labels. `nil` for single-file, pasted, or web attachments.
+    public let filePath: String?
 
-    public init(id: UUID, sourceName: String, ordinal: Int, text: String, embedding: [Float]? = nil) {
+    public init(id: UUID, sourceName: String, ordinal: Int, text: String, embedding: [Float]? = nil, filePath: String? = nil) {
         self.id = id
         self.sourceName = sourceName
         self.ordinal = ordinal
         self.text = text
         self.embedding = embedding
+        self.filePath = filePath
     }
 }
 
@@ -81,7 +85,8 @@ public struct ContextAssembler: Sendable {
                   query: String,
                   available: Int,
                   plan: [ContextStrategy],
-                  retrievalQuery: String? = nil) async -> AssembledContext? {
+                  retrievalQuery: String? = nil,
+                  onStatus: (@Sendable (String) async -> Void)? = nil) async -> AssembledContext? {
         guard !chunks.isEmpty, !plan.isEmpty, available > 0 else { return nil }
 
         var attempted: [ContextStrategy] = []
@@ -94,9 +99,9 @@ public struct ContextAssembler: Sendable {
                 case .truncate:
                     return truncate(chunks, available: available, attempted: attempted)
                 case .retrieval:
-                    return try await retrieve(chunks, query: retrievalQuery ?? query, available: available, attempted: attempted)
+                    return try await retrieve(chunks, query: retrievalQuery ?? query, available: available, attempted: attempted, onStatus: onStatus)
                 case .summarize:
-                    return try await summarize(chunks, query: query, available: available, attempted: attempted)
+                    return try await summarize(chunks, query: query, available: available, attempted: attempted, onStatus: onStatus)
                 }
             } catch is CancellationError {
                 return nil
@@ -138,7 +143,8 @@ public struct ContextAssembler: Sendable {
     private func retrieve(_ chunks: [RetrievableChunk],
                           query: String,
                           available: Int,
-                          attempted: [ContextStrategy]) async throws -> AssembledContext {
+                          attempted: [ContextStrategy],
+                          onStatus: (@Sendable (String) async -> Void)? = nil) async throws -> AssembledContext {
         // Embed the query first so we know the embedder's vector dimension. A cached chunk
         // vector of a different length was produced by a different embedder and can't be
         // compared, so it's treated as missing and recomputed. (Task prefixes are a server-
@@ -148,15 +154,34 @@ public struct ContextAssembler: Sendable {
         guard !queryVector.isEmpty else { throw OllamaError.server("Empty query embedding.") }
         let dimension = queryVector.count
 
-        var working = chunks
+        // Stage 1 — lexical pre-filter: narrow to candidates before the costly embedding of
+        // missing chunks. Only engages for large sets with enough keyword matches; small docs
+        // and synonym-only queries fall through to full semantic retrieval over everything.
+        let keywords = LexicalFilter.keywords(from: query)
+        let kept = LexicalFilter.narrow(chunks.map(\.text),
+                                        paths: chunks.map(\.filePath),
+                                        keywords: keywords)
+        var working = kept.count == chunks.count ? chunks : kept.map { chunks[$0] }
         var newEmbeddings: [UUID: [Float]] = [:]
         let missing = working.enumerated().filter { $0.element.embedding?.count != dimension }
         if !missing.isEmpty {
-            let vectors = try await embedder.embed(model: "",
-                                                  input: missing.map { "search_document: " + $0.element.text })
-            for (vectorIndex, item) in missing.enumerated() {
-                working[item.offset].embedding = vectors[vectorIndex]
-                newEmbeddings[item.element.id] = vectors[vectorIndex]
+            // Embed in batches so progress can be reported for a large source (each batch is
+            // still embedded in parallel internally). Cached chunks are skipped, so repeat
+            // queries stay cheap.
+            let total = missing.count
+            let batchSize = 48
+            var start = 0
+            while start < total {
+                let end = min(start + batchSize, total)
+                let slice = Array(missing[start..<end])
+                let vectors = try await embedder.embed(model: "",
+                                                       input: slice.map { "search_document: " + $0.element.text })
+                for (k, item) in slice.enumerated() {
+                    working[item.offset].embedding = vectors[k]
+                    newEmbeddings[item.element.id] = vectors[k]
+                }
+                start = end
+                await onStatus?("Embedding excerpts… \(end) of \(total)")
             }
         }
 
@@ -204,17 +229,19 @@ public struct ContextAssembler: Sendable {
     private func summarize(_ chunks: [RetrievableChunk],
                            query: String,
                            available: Int,
-                           attempted: [ContextStrategy]) async throws -> AssembledContext {
+                           attempted: [ContextStrategy],
+                           onStatus: (@Sendable (String) async -> Void)? = nil) async throws -> AssembledContext {
         // Map: summarize each chunk with the task in view. Run a bounded number of
         // summaries concurrently so a many-chunk document doesn't take N sequential
         // round-trips, while capping load on the server.
         let ordered = chunks.sorted { $0.ordinal < $1.ordinal }
-        let summaries = try await mapSummaries(ordered, query: query)
+        let summaries = try await mapSummaries(ordered, query: query, onStatus: onStatus)
 
         // Reduce: collapse the summaries until they fit (bounded iterations).
         var combined = summaries.joined(separator: "\n\n")
         var iterations = 0
         while TokenEstimator.estimate(combined) > available, iterations < 3, summaries.count > 1 {
+            await onStatus?("Combining summaries…")
             combined = try await summarizeOne(combined, query: query)
             iterations += 1
         }
@@ -269,18 +296,23 @@ public struct ContextAssembler: Sendable {
     /// Summarizes chunks with bounded concurrency, preserving input order. Keeps at
     /// most `maxConcurrent` summary calls in flight so a large document is summarized
     /// quickly without overwhelming the server.
-    private func mapSummaries(_ chunks: [RetrievableChunk], query: String) async throws -> [String] {
+    private func mapSummaries(_ chunks: [RetrievableChunk], query: String,
+                              onStatus: (@Sendable (String) async -> Void)? = nil) async throws -> [String] {
         let maxConcurrent = 4
+        let total = chunks.count
         return try await withThrowingTaskGroup(of: (Int, String).self) { group in
-            var results = [String](repeating: "", count: chunks.count)
+            var results = [String](repeating: "", count: total)
             var next = 0
-            for _ in 0..<min(maxConcurrent, chunks.count) {
+            var completed = 0
+            for _ in 0..<min(maxConcurrent, total) {
                 let i = next; next += 1
                 group.addTask { (i, try await summarizeOne(chunks[i].text, query: query)) }
             }
             while let (index, summary) = try await group.next() {
                 results[index] = summary
-                if next < chunks.count {
+                completed += 1
+                await onStatus?("Summarizing sections… \(completed) of \(total)")
+                if next < total {
                     let i = next; next += 1
                     group.addTask { (i, try await summarizeOne(chunks[i].text, query: query)) }
                 }

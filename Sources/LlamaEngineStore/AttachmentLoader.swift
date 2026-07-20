@@ -47,25 +47,19 @@ public enum AttachmentLoader {
             .contains(url.pathExtension.lowercased())
     }
 
-    @MainActor
-    @discardableResult
-    public static func load(from url: URL,
-                     into session: ChatSession,
-                     modelContext: ModelContext) throws -> Attachment {
-        let didAccess = url.startAccessingSecurityScopedResource()
-        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+    /// A `Sendable` snapshot of what to insert, computed off the main actor.
+    private struct Prepared: Sendable {
+        let imageData: Data?
+        let text: String?
+        let chunks: [String]
+    }
 
-        let name = url.lastPathComponent
-        let data = try Data(contentsOf: url)
-
-        // Image attachments are stored raw and sent to a vision model — not chunked.
-        if isImage(url) {
-            let attachment = Attachment(fileName: name, imageData: data)
-            attachment.session = session
-            modelContext.insert(attachment)
-            return attachment
-        }
-
+    /// Reads, decodes, and chunks a file — the IO + CPU work — off the main actor. Pure and
+    /// `nonisolated` so it runs on a detached task. Uses a memory-mapped read to avoid copying
+    /// a large file into memory.
+    private static func prepareFile(url: URL, name: String) throws -> Prepared {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        if isImage(url) { return Prepared(imageData: data, text: nil, chunks: []) }
         guard let text = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {
             throw LoaderError.unreadable(name)
@@ -73,18 +67,62 @@ public enum AttachmentLoader {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LoaderError.empty(name)
         }
+        return Prepared(imageData: nil, text: text, chunks: TextChunker().chunk(text))
+    }
 
-        let attachment = Attachment(fileName: name, fullText: text)
+    @MainActor
+    @discardableResult
+    public static func load(from url: URL,
+                     into session: ChatSession,
+                     modelContext: ModelContext,
+                     onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> Attachment {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+        let name = url.lastPathComponent
+
+        // Read, decode, and chunk off the main actor so a large file doesn't freeze the UI.
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            try prepareFile(url: url, name: name)
+        }.value
+
+        // Image attachments are stored raw and sent to a vision model — not chunked.
+        if let imageData = prepared.imageData {
+            let attachment = Attachment(fileName: name, imageData: imageData)
+            attachment.session = session
+            modelContext.insert(attachment)
+            return attachment
+        }
+
+        let attachment = Attachment(fileName: name, fullText: prepared.text ?? "")
         attachment.session = session
         modelContext.insert(attachment)
-
-        let chunker = TextChunker()
-        for (index, chunkText) in chunker.chunk(text).enumerated() {
-            let chunk = DocumentChunk(ordinal: index, text: chunkText)
-            chunk.attachment = attachment
-            modelContext.insert(chunk)
-        }
+        await insertChunks(prepared.chunks, into: attachment, modelContext: modelContext, onProgress: onProgress)
         return attachment
+    }
+
+    /// Inserts `DocumentChunk`s in batches, yielding to the run loop between batches so a large
+    /// source stays responsive, and reporting progress in `0...1`. SwiftData `@Model`s must be
+    /// created on the main actor, so this stays here; only the read/chunk work moved off.
+    @MainActor
+    private static func insertChunks(_ chunks: [String],
+                                     into attachment: Attachment,
+                                     modelContext: ModelContext,
+                                     onProgress: (@MainActor (Double) -> Void)?) async {
+        let total = chunks.count
+        guard total > 0 else { onProgress?(1); return }
+        let batchSize = 200
+        var index = 0
+        while index < total {
+            let end = min(index + batchSize, total)
+            for i in index..<end {
+                let chunk = DocumentChunk(ordinal: i, text: chunks[i])
+                chunk.attachment = attachment
+                modelContext.insert(chunk)
+            }
+            index = end
+            onProgress?(Double(index) / Double(total))
+            if index < total { await Task.yield() }
+        }
     }
 
     /// Creates a text attachment from in-memory text (a pasted note or a fetched web page)
@@ -95,17 +133,13 @@ public enum AttachmentLoader {
     public static func makeTextAttachment(name: String,
                                    text: String,
                                    into session: ChatSession,
-                                   modelContext: ModelContext) -> Attachment {
+                                   modelContext: ModelContext,
+                                   onProgress: (@MainActor (Double) -> Void)? = nil) async -> Attachment {
         let attachment = Attachment(fileName: name, fullText: text)
         attachment.session = session
         modelContext.insert(attachment)
-
-        let chunker = TextChunker()
-        for (index, chunkText) in chunker.chunk(text).enumerated() {
-            let chunk = DocumentChunk(ordinal: index, text: chunkText)
-            chunk.attachment = attachment
-            modelContext.insert(chunk)
-        }
+        let chunks = await Task.detached(priority: .userInitiated) { TextChunker().chunk(text) }.value
+        await insertChunks(chunks, into: attachment, modelContext: modelContext, onProgress: onProgress)
         return attachment
     }
 }

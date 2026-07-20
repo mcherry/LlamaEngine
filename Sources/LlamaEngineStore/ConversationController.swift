@@ -164,6 +164,7 @@ public final class ConversationController {
             assistant.requestPayload = RequestInspector.payload(for: request,
                                                                 backend: session.backend,
                                                                 appleOptions: session.appleOptions)
+            self.activityStatus = "Waiting for the model…"
             await self.consume(backend.chat(request),
                                into: assistant,
                                session: session,
@@ -314,12 +315,15 @@ public final class ConversationController {
                          modelContext: ModelContext) async {
         let started = Date()
         var sawFirstToken = false
+        // Clear any assembly/waiting status once streaming ends (or if it produced nothing).
+        defer { activityStatus = nil }
         do {
             for try await chunk in stream {
                 if !sawFirstToken,
                    !chunk.contentDelta.isEmpty || !chunk.thinkingDelta.isEmpty {
                     assistant.firstTokenSeconds = Date().timeIntervalSince(started)
                     sawFirstToken = true
+                    activityStatus = nil   // the reply is arriving — drop the status line
                 }
                 if chunk.isReplacement {
                     // Cumulative snapshot (Apple backend): replace the body.
@@ -356,8 +360,12 @@ public final class ConversationController {
             isStreaming = false
             let cancelled = (error is CancellationError) || (error as? URLError)?.code == .cancelled
             if cancelled {
-                // The user stopped generation; keep whatever streamed so far.
-                if !assistant.content.isEmpty {
+                // The user stopped generation. Keep whatever streamed so far, but if nothing
+                // arrived at all (no answer and no reasoning), drop the empty bubble so it
+                // doesn't linger with a spinner.
+                if assistant.content.isEmpty && assistant.thinking.isEmpty {
+                    modelContext.delete(assistant)
+                } else if !assistant.content.isEmpty {
                     assistant.generationSeconds = Date().timeIntervalSince(started)
                 }
                 session.updatedAt = .now
@@ -594,10 +602,12 @@ public final class ConversationController {
             return kept.map { ChatTurn(role: $0.role, content: $0.content) }
 
         case .summarize:
+            activityStatus = "Condensing earlier conversation…"
             return await summarizeHistory(conv, budget: budget, session: session,
                                           into: assistant, client: client!)
 
         case .retrieve:
+            activityStatus = "Finding relevant earlier messages…"
             return await retrieveHistory(conv, budget: budget, query: newUserText,
                                          session: session, into: assistant)
         }
@@ -799,6 +809,14 @@ public final class ConversationController {
                                        wholeDocTask: ContextPlanner.looksLikeWholeDocTask(query))
         guard !plan.isEmpty else { return nil }
 
+        // Surface what the (potentially slow) assembly is doing so a large source doesn't
+        // just look like a frozen spinner.
+        switch plan.first {
+        case .retrieval: activityStatus = "Searching \(chunks.count) excerpts for relevant context…"
+        case .summarize: activityStatus = "Summarizing \(chunks.count) sections…"
+        default: activityStatus = "Reading attached sources…"
+        }
+
         let assembler = ContextAssembler(client: client,
                                          embedder: AppleEmbedder(),
                                          chatModel: session.modelName)
@@ -814,7 +832,10 @@ public final class ConversationController {
                                                     query: query,
                                                     available: available,
                                                     plan: plan,
-                                                    retrievalQuery: retrievalQuery) else { return nil }
+                                                    retrievalQuery: retrievalQuery,
+                                                    onStatus: { [weak self] status in
+                                                        await MainActor.run { self?.activityStatus = status }
+                                                    }) else { return nil }
 
         // Persist freshly computed embeddings back onto the @Model chunks.
         if !result.newEmbeddings.isEmpty {
