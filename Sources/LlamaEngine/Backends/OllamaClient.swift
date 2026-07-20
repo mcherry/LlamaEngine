@@ -42,6 +42,17 @@ public protocol LLMBackend: ChatStreaming {
     /// The model's maximum trained context length, or `nil` if the server doesn't
     /// report it, so the app can cap its planning window to what the model supports.
     func modelContextLength(_ name: String) async throws -> Int?
+    /// The model's capability tags (e.g. `["completion", "vision", "thinking"]`), or an
+    /// empty array when the backend can't introspect them. Lets the UI show only the
+    /// controls a model actually supports (e.g. hide reasoning for non-thinking models).
+    func modelCapabilities(_ name: String) async throws -> [String]
+}
+
+public extension LLMBackend {
+    /// Default: capabilities unknown. Backends that can't report per-model capabilities
+    /// (e.g. llama.cpp) return empty, and callers treat empty as "unknown" rather than
+    /// "unsupported".
+    func modelCapabilities(_ name: String) async throws -> [String] { [] }
 }
 
 /// A complete remote server backend: chat streaming, model listing, context-length
@@ -92,6 +103,22 @@ public struct OllamaClient: Sendable, ServerBackend {
             throw OllamaError.http(http.statusCode)
         }
         return Self.parseContextLength(data)
+    }
+
+    /// The model's capability tags from `POST /api/show` (`capabilities` array, e.g.
+    /// `["completion", "vision", "thinking"]`), or an empty array if the server doesn't
+    /// report them. Lets the app tailor per-model controls (e.g. reasoning).
+    public func modelCapabilities(_ name: String) async throws -> [String] {
+        var request = URLRequest(url: baseURL.appending(path: "api/show"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["model": name])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw OllamaError.http(http.statusCode)
+        }
+        return Self.parseCapabilities(data)
     }
 
     /// Models currently loaded in memory (`GET /api/ps`).
@@ -274,6 +301,14 @@ public struct OllamaClient: Sendable, ServerBackend {
             if let s = value as? String, let n = Int(s), n > 0 { return n }
         }
         return nil
+    }
+
+    /// Extracts the model's capability tags from an `/api/show` payload (the top-level
+    /// `capabilities` array), lowercased. Empty when absent. Pure/static for testing.
+    public static func parseCapabilities(_ data: Data) -> [String] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let caps = root["capabilities"] as? [String] else { return [] }
+        return caps.map { $0.lowercased() }
     }
 
     /// Decodes one line of the streamed JSONL response into a `ChatChunk`.

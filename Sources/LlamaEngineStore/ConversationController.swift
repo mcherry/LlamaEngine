@@ -34,7 +34,6 @@ public final class ConversationController {
     public func send(text: String,
               session: ChatSession,
               client: (any ServerBackend)?,
-              embeddingModel: String,
               diagramGuidance: Bool = false,
               rightSizeContext: Bool = true,
               keepAliveMinutes: Int = 5,
@@ -93,8 +92,7 @@ public final class ConversationController {
             let contextBlock = await self.assembleContext(query: trimmed,
                                                           session: session,
                                                           into: assistant,
-                                                          client: client,
-                                                          embeddingModel: embeddingModel)
+                                                          client: client)
 
             if Task.isCancelled {
                 if assistant.content.isEmpty { modelContext.delete(assistant) }
@@ -120,8 +118,7 @@ public final class ConversationController {
                                                           newUserText: trimmed,
                                                           contextBlock: contextBlock,
                                                           into: assistant,
-                                                          client: client,
-                                                          embeddingModel: embeddingModel)
+                                                          client: client)
             let turns = self.buildTurns(for: session,
                                         contextBlock: contextBlock,
                                         historyTurns: historyTurns,
@@ -558,8 +555,7 @@ public final class ConversationController {
                                  newUserText: String,
                                  contextBlock: String?,
                                  into assistant: ChatMessage,
-                                 client: (any ServerBackend)?,
-                                 embeddingModel: String) async -> [ChatTurn] {
+                                 client: (any ServerBackend)?) async -> [ChatTurn] {
         let conv = session.orderedMessages
             .filter { $0.role != .system && !$0.content.isEmpty }
             .map { HistoryTurn(id: $0.id, role: $0.role.rawValue, content: $0.content,
@@ -603,8 +599,7 @@ public final class ConversationController {
 
         case .retrieve:
             return await retrieveHistory(conv, budget: budget, query: newUserText,
-                                         session: session, into: assistant,
-                                         client: client!, embeddingModel: embeddingModel)
+                                         session: session, into: assistant)
         }
     }
 
@@ -659,9 +654,7 @@ public final class ConversationController {
                                  budget: Int,
                                  query: String,
                                  session: ChatSession,
-                                 into assistant: ChatMessage,
-                                 client: any ServerBackend,
-                                 embeddingModel: String) async -> [ChatTurn] {
+                                 into assistant: ChatMessage) async -> [ChatTurn] {
         let (older, recent) = ConversationHistory.splitRecent(conv, keepRecent: recentTurnsToKeep)
         let (keptRecent, _) = ConversationHistory.truncateToFit(recent, budget: budget)
         let remaining = max(0, budget - ConversationHistory.tokenCount(keptRecent))
@@ -671,20 +664,25 @@ public final class ConversationController {
         }
 
         do {
+            let embedder = AppleEmbedder()
+            // Embed the query first to learn the vector dimension; a cached turn vector of a
+            // different length came from another embedder and is recomputed.
+            let queryVector = try await embedder.embed(model: "",
+                                                       input: ["search_query: " + query]).first ?? []
+            guard !queryVector.isEmpty else { throw OllamaError.server("Empty query embedding.") }
+            let dimension = queryVector.count
+
             var working = older
             var newEmbeddings: [UUID: [Float]] = [:]
-            let missing = working.enumerated().filter { $0.element.embedding == nil }
+            let missing = working.enumerated().filter { $0.element.embedding?.count != dimension }
             if !missing.isEmpty {
-                let vectors = try await client.embed(model: embeddingModel,
-                                                     input: missing.map { "search_document: " + $0.element.content })
+                let vectors = try await embedder.embed(model: "",
+                                                       input: missing.map { "search_document: " + $0.element.content })
                 for (k, item) in missing.enumerated() {
                     working[item.offset].embedding = vectors[k]
                     newEmbeddings[item.element.id] = vectors[k]
                 }
             }
-            let queryVector = try await client.embed(model: embeddingModel,
-                                                     input: ["search_query: " + query]).first ?? []
-            guard !queryVector.isEmpty else { throw OllamaError.server("Empty query embedding.") }
 
             // Persist freshly computed embeddings back onto the @Model messages.
             if !newEmbeddings.isEmpty {
@@ -757,13 +755,12 @@ public final class ConversationController {
     private func assembleContext(query: String,
                                  session: ChatSession,
                                  into assistant: ChatMessage,
-                                 client: (any ServerBackend)?,
-                                 embeddingModel: String) async -> String? {
+                                 client: (any ServerBackend)?) async -> String? {
         let attachments = session.orderedAttachments.filter { !$0.isImage }
         guard !attachments.isEmpty else { return nil }
-        // Context assembly (embeddings, summarization) runs on the session's server. An
-        // Apple-only session with no server simply sends without document context.
-        guard let client else { return nil }
+        // Retrieval uses on-device embeddings, so document context works with any backend
+        // (even a session with no server). Summarization still needs the chat server and
+        // drops to truncation when there isn't one.
 
         var chunks: [RetrievableChunk] = []
         var ordinal = 0
@@ -803,8 +800,8 @@ public final class ConversationController {
         guard !plan.isEmpty else { return nil }
 
         let assembler = ContextAssembler(client: client,
-                                         chatModel: session.modelName,
-                                         embeddingModel: embeddingModel)
+                                         embedder: AppleEmbedder(),
+                                         chatModel: session.modelName)
         // Retrieve using the question plus a short tail of recent turns so follow-ups
         // resolve against the surrounding conversation.
         let priorTurns = session.orderedMessages

@@ -108,6 +108,24 @@ final class OllamaClientTests: XCTestCase {
         XCTAssertNil(OllamaClient.parseContextLength(data))
     }
 
+    // MARK: - /api/show capabilities
+
+    func testParseCapabilitiesReadsAndLowercasesTags() throws {
+        let json = #"{"capabilities":["completion","Vision","Thinking"]}"#
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        XCTAssertEqual(OllamaClient.parseCapabilities(data), ["completion", "vision", "thinking"])
+    }
+
+    func testParseCapabilitiesMissingIsEmpty() throws {
+        let data = try XCTUnwrap(#"{"model_info":{"general.architecture":"llama"}}"#.data(using: .utf8))
+        XCTAssertTrue(OllamaClient.parseCapabilities(data).isEmpty)
+    }
+
+    func testParseCapabilitiesGarbageIsEmpty() throws {
+        let data = try XCTUnwrap("not json".data(using: .utf8))
+        XCTAssertTrue(OllamaClient.parseCapabilities(data).isEmpty)
+    }
+
     // MARK: - Title cleanup
 
     func testTitleStripsQuotesAndTrailingPunctuation() {

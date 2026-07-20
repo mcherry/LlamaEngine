@@ -38,9 +38,10 @@ public enum HistoryMode: String, Codable, Sendable, CaseIterable, Identifiable {
         }
     }
 
-    /// Whether this mode needs the Ollama server (for summarizing or embedding). When
-    /// unavailable, the engine falls back to truncation.
+    /// Whether this mode needs the chat server (for summarization). Retrieval now uses
+    /// on-device embeddings, so it doesn't. When unavailable, the engine falls back to
+    /// truncation.
     public var needsServer: Bool {
-        self == .summarize || self == .retrieve
+        self == .summarize
     }
 }

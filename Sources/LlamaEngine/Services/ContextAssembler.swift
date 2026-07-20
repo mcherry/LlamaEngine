@@ -59,15 +59,22 @@ public struct AssembledContext: Sendable {
 /// (Ollama or llama.cpp), so it embeds and summarizes against whichever server the
 /// session uses.
 public struct ContextAssembler: Sendable {
-    public var client: any ServerBackend
+    /// The chat backend, reused for map-reduce summarization. Optional because retrieval
+    /// (via the injected embedder) and inline/truncate need no server, so a session with
+    /// no server (Apple-only) can still assemble context — summarize just won't run.
+    public var client: (any ServerBackend)?
+    /// Produces embeddings for the retrieval strategy. On-device by default, so retrieval
+    /// works regardless of which chat backend the session uses.
+    public var embedder: any EmbeddingBackend
     /// The session's chat model, reused for map-reduce summarization.
     public var chatModel: String
-    public var embeddingModel: String
 
-    public init(client: any ServerBackend, chatModel: String, embeddingModel: String) {
+    public init(client: (any ServerBackend)?,
+                embedder: any EmbeddingBackend,
+                chatModel: String) {
         self.client = client
+        self.embedder = embedder
         self.chatModel = chatModel
-        self.embeddingModel = embeddingModel
     }
 
     public func assemble(chunks: [RetrievableChunk],
@@ -132,24 +139,26 @@ public struct ContextAssembler: Sendable {
                           query: String,
                           available: Int,
                           attempted: [ContextStrategy]) async throws -> AssembledContext {
-        // Embed any chunks that don't have a cached vector yet (nomic wants the
-        // `search_document:` task prefix).
+        // Embed the query first so we know the embedder's vector dimension. A cached chunk
+        // vector of a different length was produced by a different embedder and can't be
+        // compared, so it's treated as missing and recomputed. (Task prefixes are a server-
+        // embedder convention; the on-device embedder strips them.)
+        let queryVector = try await embedder.embed(model: "",
+                                                  input: ["search_query: " + query]).first ?? []
+        guard !queryVector.isEmpty else { throw OllamaError.server("Empty query embedding.") }
+        let dimension = queryVector.count
+
         var working = chunks
         var newEmbeddings: [UUID: [Float]] = [:]
-        let missing = working.enumerated().filter { $0.element.embedding == nil }
+        let missing = working.enumerated().filter { $0.element.embedding?.count != dimension }
         if !missing.isEmpty {
-            let vectors = try await client.embed(model: embeddingModel,
-                                                 input: missing.map { "search_document: " + $0.element.text })
+            let vectors = try await embedder.embed(model: "",
+                                                  input: missing.map { "search_document: " + $0.element.text })
             for (vectorIndex, item) in missing.enumerated() {
                 working[item.offset].embedding = vectors[vectorIndex]
                 newEmbeddings[item.element.id] = vectors[vectorIndex]
             }
         }
-
-        // Embed the query (`search_query:` prefix) and score every chunk.
-        let queryVector = try await client.embed(model: embeddingModel,
-                                                 input: ["search_query: " + query]).first ?? []
-        guard !queryVector.isEmpty else { throw OllamaError.server("Empty query embedding.") }
 
         let scored = working.compactMap { chunk -> (chunk: RetrievableChunk, score: Float)? in
             guard let embedding = chunk.embedding else { return nil }
@@ -224,6 +233,7 @@ public struct ContextAssembler: Sendable {
     }
 
     private func summarizeOne(_ text: String, query: String) async throws -> String {
+        guard let client else { throw OllamaError.server("Summarization needs a chat server.") }
         let system = "You compress documents so they can be used to answer a question later. Summarize the text, preserving facts, names, numbers, and anything relevant to the user's task. Be concise and output only the summary."
         let user = "User's task: \(query)\n\nText:\n\(text)\n\nSummary:"
         let request = ChatRequest(

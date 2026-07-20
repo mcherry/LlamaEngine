@@ -10,7 +10,8 @@ final class HistoryModeTests: XCTestCase {
         XCTAssertFalse(HistoryMode.full.needsServer)
         XCTAssertFalse(HistoryMode.truncate.needsServer)
         XCTAssertTrue(HistoryMode.summarize.needsServer)
-        XCTAssertTrue(HistoryMode.retrieve.needsServer)
+        // Retrieval now uses on-device embeddings, so it no longer needs a server.
+        XCTAssertFalse(HistoryMode.retrieve.needsServer)
     }
 
     func testHistoryModeRawRoundTrip() {

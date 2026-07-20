@@ -11,6 +11,9 @@ public struct BackendProfile: Sendable, Equatable {
     public var needsServerURL: Bool
     /// Offers a list of selectable models (shows a model picker).
     public var listsModels: Bool
+    /// The user chooses the model from a list (Ollama). `false` when the server dictates
+    /// a single loaded model (llama.cpp), which the app auto-selects and shows read-only.
+    public var modelSelectable: Bool
     /// The app controls the context-window size (e.g. Ollama's `num_ctx`). `false` when
     /// the window is fixed by the server launch flags or the on-device model, in which
     /// case the app discovers it rather than letting the user set it.
@@ -40,6 +43,7 @@ public struct BackendProfile: Sendable, Equatable {
     public init(kind: BackendKind,
                 needsServerURL: Bool,
                 listsModels: Bool,
+                modelSelectable: Bool,
                 contextWindowAdjustable: Bool,
                 supportsSampling: Bool,
                 supportsReasoning: Bool,
@@ -53,6 +57,7 @@ public struct BackendProfile: Sendable, Equatable {
         self.kind = kind
         self.needsServerURL = needsServerURL
         self.listsModels = listsModels
+        self.modelSelectable = modelSelectable
         self.contextWindowAdjustable = contextWindowAdjustable
         self.supportsSampling = supportsSampling
         self.supportsReasoning = supportsReasoning
@@ -77,7 +82,7 @@ public extension BackendKind {
         case .ollama:
             return BackendProfile(
                 kind: .ollama,
-                needsServerURL: true, listsModels: true, contextWindowAdjustable: true,
+                needsServerURL: true, listsModels: true, modelSelectable: true, contextWindowAdjustable: true,
                 supportsSampling: true, supportsReasoning: true, supportsRetrieval: true,
                 supportsVision: true, supportsKeepAlive: true, supportsModelManagement: true,
                 producesImages: false, isOnDevice: false, isOptionalFeature: false)
@@ -86,7 +91,7 @@ public extension BackendKind {
             // model management, keep-alive, and an adjustable window don't apply.
             return BackendProfile(
                 kind: .llamaServer,
-                needsServerURL: true, listsModels: true, contextWindowAdjustable: false,
+                needsServerURL: true, listsModels: true, modelSelectable: false, contextWindowAdjustable: false,
                 supportsSampling: true, supportsReasoning: true, supportsRetrieval: true,
                 supportsVision: false, supportsKeepAlive: false, supportsModelManagement: false,
                 producesImages: false, isOnDevice: false, isOptionalFeature: false)
@@ -94,14 +99,14 @@ public extension BackendKind {
             // On-device: no server, single model, its own generation options.
             return BackendProfile(
                 kind: .appleIntelligence,
-                needsServerURL: false, listsModels: false, contextWindowAdjustable: false,
+                needsServerURL: false, listsModels: false, modelSelectable: false, contextWindowAdjustable: false,
                 supportsSampling: false, supportsReasoning: false, supportsRetrieval: true,
                 supportsVision: false, supportsKeepAlive: false, supportsModelManagement: false,
                 producesImages: false, isOnDevice: true, isOptionalFeature: false)
         case .imageGeneration:
             return BackendProfile(
                 kind: .imageGeneration,
-                needsServerURL: true, listsModels: true, contextWindowAdjustable: false,
+                needsServerURL: true, listsModels: true, modelSelectable: false, contextWindowAdjustable: false,
                 supportsSampling: false, supportsReasoning: false, supportsRetrieval: false,
                 supportsVision: false, supportsKeepAlive: false, supportsModelManagement: false,
                 producesImages: true, isOnDevice: false, isOptionalFeature: true)
