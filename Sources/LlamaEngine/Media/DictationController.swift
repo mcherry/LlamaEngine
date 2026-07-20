@@ -185,6 +185,21 @@ public final class DictationController {
             // request has been ended (which would crash).
             sink.append(buffer)
         }
+        #if os(iOS)
+        // iOS requires an active audio session before the engine can tap the microphone.
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord, mode: .default,
+                                         options: [.duckOthers, .defaultToSpeaker])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            clearCrashGuard()
+            starting = false
+            errorMessage = error.localizedDescription
+            teardown()
+            return
+        }
+        #endif
         engine.prepare()
         do {
             try engine.start()
@@ -258,6 +273,9 @@ public final class DictationController {
         sink?.finish()
         sink = nil
         request = nil
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
     }
 
     public func clearError() { errorMessage = nil }

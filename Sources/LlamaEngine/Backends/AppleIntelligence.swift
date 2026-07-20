@@ -3,6 +3,18 @@ import Foundation
 import FoundationModels
 #endif
 
+// Platform-specific labels so user-facing text reads naturally on each OS while the
+// macOS wording stays exactly as it was.
+#if os(macOS)
+private let aiDeviceLabel = "Mac"
+private let aiOSLabel = "macOS 26"
+private let aiSettingsLabel = "System Settings"
+#else
+private let aiDeviceLabel = "iPad"
+private let aiOSLabel = "iPadOS 26"
+private let aiSettingsLabel = "Settings"
+#endif
+
 /// Errors from the Apple Intelligence backend.
 public enum AppleIntelligenceError: LocalizedError {
     case unsupportedOS
@@ -11,7 +23,7 @@ public enum AppleIntelligenceError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unsupportedOS:
-            return "Apple Intelligence requires macOS 26 or later."
+            return "Apple Intelligence requires \(aiOSLabel) or later."
         case .unavailable(let message):
             return message
         }
@@ -31,7 +43,7 @@ public enum AppleIntelligence {
 
     public static var status: Status {
         #if canImport(FoundationModels)
-        if #available(macOS 26, *) {
+        if #available(macOS 26, iOS 26, *) {
             switch SystemLanguageModel.default.availability {
             case .available:
                 return .available
@@ -57,22 +69,22 @@ public enum AppleIntelligence {
     public static var statusMessage: String {
         switch status {
         case .available:
-            return "Apple Intelligence is available on this Mac."
+            return "Apple Intelligence is available on this \(aiDeviceLabel)."
         case .unavailable(let message):
             return message
         case .unsupportedOS:
-            return "Requires macOS 26 or later."
+            return "Requires \(aiOSLabel) or later."
         }
     }
 
     #if canImport(FoundationModels)
-    @available(macOS 26, *)
+    @available(macOS 26, iOS 26, *)
     private static func describe(_ reason: SystemLanguageModel.Availability.UnavailableReason) -> String {
         switch reason {
         case .deviceNotEligible:
-            return "This Mac doesn't support Apple Intelligence."
+            return "This \(aiDeviceLabel) doesn't support Apple Intelligence."
         case .appleIntelligenceNotEnabled:
-            return "Turn on Apple Intelligence in System Settings to use it here."
+            return "Turn on Apple Intelligence in \(aiSettingsLabel) to use it here."
         case .modelNotReady:
             return "The on-device model is still downloading or preparing."
         @unknown default:

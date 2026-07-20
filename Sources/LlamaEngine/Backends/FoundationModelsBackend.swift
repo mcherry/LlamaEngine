@@ -23,7 +23,7 @@ public struct FoundationModelsBackend: ChatStreaming {
         AsyncThrowingStream { continuation in
             let task = Task { [options] in
                 #if canImport(FoundationModels)
-                if #available(macOS 26, *) {
+                if #available(macOS 26, iOS 26, *) {
                     await Self.stream(request, options: options, into: continuation)
                 } else {
                     continuation.finish(throwing: AppleIntelligenceError.unsupportedOS)
@@ -37,7 +37,7 @@ public struct FoundationModelsBackend: ChatStreaming {
     }
 
     #if canImport(FoundationModels)
-    @available(macOS 26, *)
+    @available(macOS 26, iOS 26, *)
     private static func stream(_ request: ChatRequest,
                                options: AppleGenerationOptions,
                                into continuation: AsyncThrowingStream<ChatChunk, Error>.Continuation) async {
@@ -71,7 +71,7 @@ public struct FoundationModelsBackend: ChatStreaming {
 
     /// Maps our plain options onto Apple's `GenerationOptions`, choosing a sampling
     /// strategy. A seed is honored only by the random modes, for reproducibility.
-    @available(macOS 26, *)
+    @available(macOS 26, iOS 26, *)
     private static func makeOptions(_ o: AppleGenerationOptions) -> GenerationOptions {
         let sampling: GenerationOptions.SamplingMode?
         switch o.samplingMode {

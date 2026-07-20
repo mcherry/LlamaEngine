@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "LlamaEngine",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v15),
+        .iOS(.v18)
     ],
     products: [
         // Core: backends, context/RAG, services, settings. No SwiftUI / SwiftData.

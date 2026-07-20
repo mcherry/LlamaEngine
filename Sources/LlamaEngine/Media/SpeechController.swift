@@ -63,6 +63,11 @@ public final class SpeechController: NSObject {
         stop()
         let spoken = TextForSpeech.plain(text)
         guard !spoken.isEmpty else { return }
+        #if os(iOS)
+        // iOS needs an active playback session or the synthesizer stays silent.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
         speakingMessageID = messageID
         if narrate {
             narratingMessageID = messageID
@@ -121,12 +126,14 @@ public final class SpeechController: NSObject {
     }
 
     /// Renders `text` to a single AAC `.m4a` at `url` (Apple on-device or the Kokoro server).
-    public func saveAudio(messageID: UUID, text: String, config: Config, to url: URL) {
+    public func saveAudio(messageID: UUID, text: String, config: Config, to url: URL,
+                          onComplete: (@MainActor (Bool) -> Void)? = nil) {
         guard savingMessageID == nil else { return }
         let spoken = TextForSpeech.plain(text)
         guard !spoken.isEmpty else { return }
         savingMessageID = messageID
         Task { [weak self] in
+            var succeeded = false
             do {
                 switch config.engine {
                 case .apple:
@@ -138,10 +145,12 @@ public final class SpeechController: NSObject {
                         TTSRequest(text: spoken, voice: config.serverVoice, speed: config.speed, format: "wav"))
                     try await AudioExport.writeM4A(wav: data, to: url)
                 }
+                succeeded = true
             } catch {
                 self?.saveError = error.localizedDescription
             }
             self?.savingMessageID = nil
+            onComplete?(succeeded)
         }
     }
 
