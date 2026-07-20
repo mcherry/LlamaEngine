@@ -47,13 +47,13 @@ let request = ChatRequest(
 
 ## Retrieve over documents (RAG)
 
-Gather your source text as ``RetrievableChunk`` values, then let ``ContextAssembler`` embed,
-retrieve (with MMR diversity), and assemble a context block within a token budget planned by
-``ContextPlanner`` and ``ContextBudget``.
+Gather your source text as ``RetrievableChunk`` values, then let ``ContextAssembler`` embed
+(on-device, via ``AppleEmbedder``), retrieve (with a lexical prefilter and MMR diversity),
+and assemble a context block within a token budget planned by ``ContextPlanner`` and
+``ContextBudget``.
 
 ```swift
-let assembler = ContextAssembler(client: client, chatModel: "llama3.2",
-                                 embeddingModel: "nomic-embed-text")
+let assembler = ContextAssembler(client: client, embedder: AppleEmbedder(), chatModel: "llama3.2")
 
 let result = await assembler.assemble(
     chunks: chunks,

@@ -6,9 +6,9 @@ speech, image generation, and web access — with no UI.
 ## Overview
 
 LlamaEngine is the core product of the package. It imports no SwiftUI and no AppKit, so it
-can back any front end — a macOS app, a menu‑bar utility, a CLI, or a future iOS target.
+can back any front end — a macOS app, a menu‑bar utility, a CLI, or an iOS/iPadOS app.
 
-It talks to a local [Ollama](https://ollama.com) server (and Apple Intelligence) behind the
+It talks to [Ollama](https://ollama.com), a llama.cpp server, and Apple Intelligence behind the
 ``ChatStreaming`` / ``LLMBackend`` protocols, and provides the supporting machinery for
 retrieval‑augmented chat: chunking, embeddings, token budgeting, conversation‑history
 management, vision, speech, image generation, and web ingestion.
@@ -28,10 +28,12 @@ For batteries‑included persistence — SwiftData models plus a persisting cont
 ### Talking to a model
 
 - ``OllamaClient``
+- ``LlamaServerClient``
 - ``ChatStreaming``
 - ``LLMBackend``
 - ``FoundationModelsBackend``
 - ``BackendKind``
+- ``BackendProfile``
 - ``OllamaError``
 
 ### Requests & responses
@@ -54,6 +56,10 @@ For batteries‑included persistence — SwiftData models plus a persisting cont
 ### Context & retrieval (RAG)
 
 - ``ContextAssembler``
+- ``EmbeddingBackend``
+- ``AppleEmbedder``
+- ``LexicalFilter``
+- ``DirectoryFilter``
 - ``RetrievableChunk``
 - ``RetrievedChunkInfo``
 - ``AssembledContext``

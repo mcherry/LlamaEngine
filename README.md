@@ -7,26 +7,29 @@ image generation, web access, persistence) with **no UI baked in**. Extracted fr
 feature‑complete engine and own only its presentation.
 
 The core imports **no SwiftUI and no AppKit** — the same engine can back a macOS app, a
-menu‑bar utility, a CLI, or (in future) iOS. The app "handles everything else"; LlamaEngine
+menu‑bar utility, a CLI, or an iOS/iPadOS app. The app "handles everything else"; LlamaEngine
 handles all things AI.
 
 ## Features
 
 - **Backends** — Ollama (streaming, thinking/reasoning models, generation parameters,
   `num_ctx` right‑sizing, `keep_alive`, `num_predict`, per‑model token calibration,
-  `/api/show` context length) and Apple Intelligence (Foundation Models), behind a
+  `/api/show` context length), llama.cpp (`llama-server`, OpenAI-compatible), and Apple
+  Intelligence (Foundation Models), behind a
   `ChatStreaming` / `LLMBackend` protocol so new backends are easy to add.
 - **Model management** — list / pull (with progress) / delete / running models via a
   headless, observable `ModelManager`.
-- **Context / RAG** — attachments, chunking, embeddings, retrieval with MMR diversity,
-  map‑reduce summarization, truncation, token budgeting/planning, per‑model calibration,
-  and retrieval‑query enrichment.
+- **Context / RAG** — file and **directory** attachments, chunking, **on‑device**
+  embeddings (Apple NaturalLanguage — no embedding server, works offline with any
+  backend), retrieval with a lexical prefilter and MMR diversity, map‑reduce
+  summarization, truncation, token budgeting/planning, per‑model calibration, and
+  retrieval‑query enrichment.
 - **Conversation history** — full / truncate / rolling‑summary / embedding‑retrieval modes
   that engage only when the window would overflow.
 - **Vision** — native (send images to a vision‑capable model) or a preprocessor pipeline
   (describe with a dedicated vision model, then inject the text).
-- **Image generation** — Easy Diffusion backend with sampler, VAE, upscaler/hires, face
-  correction, and CLIP‑skip controls.
+- **Image generation** — Easy Diffusion and ComfyUI backends (importable workflow
+  templates), with sampler, VAE, upscaler/hires, face correction, and CLIP‑skip controls.
 - **Speech** — text‑to‑speech (Apple on‑device or a Kokoro server) and dictation
   (speech‑to‑text) with live narration.
 - **Web** — fetch, `robots.txt` compliance, readable HTML extraction, and multi‑provider
@@ -39,7 +42,7 @@ handles all things AI.
 
 ## Requirements
 
-- **macOS 15+**
+- **macOS 15+** or **iOS 18+**
 - **Swift 6** (built with complete strict concurrency)
 
 ## Installation
@@ -118,7 +121,6 @@ func startChat() {
         text: "Hello!",
         session: session,
         client: OllamaClient(baseURLString: "http://localhost:11434"),
-        embeddingModel: "nomic-embed-text",
         modelContext: container.mainContext
     )
     // Observe `controller.isStreaming` and `session.orderedMessages` from SwiftUI.
@@ -143,7 +145,7 @@ Two layers in one package:
 
 ```
 LlamaEngine  (core — headless, no SwiftUI/SwiftData)
-├── Backends/  Ollama + Apple Intelligence behind ChatStreaming/LLMBackend; ModelManager
+├── Backends/  Ollama, llama.cpp, Apple Intelligence behind ChatStreaming/LLMBackend; on-device embeddings; ModelManager
 ├── Types/     Sendable wire types: ChatTurn, ChatRequest, ChatChunk, GenerationParameters, Role
 ├── Context/   Chunking, vectors, token budgeting/calibration, history, planning
 ├── Services/  ContextAssembler (RAG), VisionExtractor, TitleGenerator, SessionExporter, ServerProbe
@@ -152,7 +154,7 @@ LlamaEngine  (core — headless, no SwiftUI/SwiftData)
 └── Web/        Fetch, robots.txt, HTML extraction, multi-provider search
 
 LlamaEngineStore  (SwiftData — depends on core)
-├── Models/                  @Model ChatSession, ChatMessage, Attachment, DocumentChunk, PromptPreset
+├── Models/                  @Model ChatSession, ChatMessage, Attachment, DocumentChunk, PromptPreset, SessionConfig
 ├── ConversationController   @MainActor @Observable — the send/stream/RAG engine
 ├── AttachmentLoader         file → chunked Attachment
 └── LlamaEngineStore.models  the schema hosts register in their ModelContainer
@@ -164,8 +166,9 @@ The host passes configuration into calls — the engine reads no `UserDefaults` 
 
 ## Key types
 
-- **Backends & requests:** `OllamaClient`, `ChatStreaming` / `LLMBackend`,
-  `FoundationModelsBackend`, `BackendKind`, `ChatRequest`, `ChatTurn`, `ChatChunk`,
+- **Backends & requests:** `OllamaClient`, `LlamaServerClient`, `ChatStreaming` / `LLMBackend`,
+  `FoundationModelsBackend`, `AppleEmbedder` / `EmbeddingBackend`, `BackendKind`,
+  `BackendProfile`, `ChatRequest`, `ChatTurn`, `ChatChunk`,
   `GenerationParameters`, `ReasoningMode`, `ModelManager`, `OllamaModel`
 - **Context / RAG:** `ContextAssembler`, `ContextPlanner`, `ContextBudget`,
   `ContextStrategy` / `ContextMode`, `ConversationHistory` / `HistoryMode`, `TextChunker`,
@@ -206,9 +209,5 @@ token budgeting, calibration, retrieval, and controller guard paths are all unit
 
 ## License
 
-Not yet finalized — the engine is shared between an MIT‑licensed app (Llamatron) and a
-proprietary one, so licensing is an open decision.
-
----
-
-_Historical design notes and the phased extraction record live in [PLAN.md](PLAN.md)._
+Developed alongside the MIT‑licensed [Llamatron](https://github.com/mcherry/Lammatron)
+app and released as open source; see the `LICENSE` file in the repository for details.

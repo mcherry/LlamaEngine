@@ -35,7 +35,6 @@ func send(_ text: String, in session: ChatSession, context: ModelContext) {
         text: text,
         session: session,
         client: OllamaClient(baseURLString: "http://localhost:11434"),
-        embeddingModel: "nomic-embed-text",
         modelContext: context
     )
     // Observe controller.isStreaming / controller.contextInfo / session.orderedMessages.
@@ -59,6 +58,11 @@ To export a conversation, use the ``ChatSession/exportSnapshot()`` helper with t
 - ``Attachment``
 - ``DocumentChunk``
 - ``PromptPreset``
+
+### Session presets
+
+- ``SessionConfig``
+- ``SessionPreset``
 
 ### Loading content
 
