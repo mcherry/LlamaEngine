@@ -78,10 +78,43 @@ public enum WebSearch {
         public let results: [Result]
         public let hasMore: Bool
         public let nextOffset: Int
-        public init(results: [Result], hasMore: Bool, nextOffset: Int) {
+        /// Per-provider outcomes for a meta-search page (empty for single-provider searches),
+        /// so the UI can flag engines that failed. See ``ProviderOutcome``.
+        public let providerOutcomes: [ProviderOutcome]
+        public init(results: [Result], hasMore: Bool, nextOffset: Int, providerOutcomes: [ProviderOutcome] = []) {
             self.results = results
             self.hasMore = hasMore
             self.nextOffset = nextOffset
+            self.providerOutcomes = providerOutcomes
+        }
+    }
+
+    /// Why a provider produced no results in a meta-search run — surfaced so the user can tell
+    /// which engines to fix (a bad key) versus wait out (rate limit / quota).
+    public enum SearchFailureReason: String, Sendable {
+        case authentication, rateLimited, outOfQuota, unavailable
+        public var label: String {
+            switch self {
+            case .authentication: return "invalid key"
+            case .rateLimited: return "rate-limited"
+            case .outOfQuota: return "out of quota"
+            case .unavailable: return "unavailable"
+            }
+        }
+    }
+
+    /// The result of querying one provider during a meta-search fan-out.
+    public struct ProviderOutcome: Sendable, Identifiable {
+        public let provider: ProviderKind
+        public let resultCount: Int
+        /// Nil when the provider succeeded; otherwise why it contributed nothing.
+        public let failureReason: SearchFailureReason?
+        public var id: String { provider.rawValue }
+        public var failed: Bool { failureReason != nil }
+        public init(provider: ProviderKind, resultCount: Int, failureReason: SearchFailureReason?) {
+            self.provider = provider
+            self.resultCount = resultCount
+            self.failureReason = failureReason
         }
     }
 
@@ -203,6 +236,13 @@ public enum WebSearch {
         let caps = config.provider.searchCapabilities
         let limit = pageLimit(offset: offset, caps: caps)
         guard limit > 0 else { return SearchPage(results: [], hasMore: false, nextOffset: offset) }
+        // Meta-search reports per-provider outcomes so the UI can flag engines that failed.
+        if let meta = provider as? MetaSearchProvider {
+            let run = await meta.run(trimmed, limit: limit)
+            let state = paginationState(offset: offset, returned: run.results.count, requested: limit, caps: caps)
+            return SearchPage(results: run.results, hasMore: state.hasMore,
+                              nextOffset: state.nextOffset, providerOutcomes: run.outcomes)
+        }
         let results = try await provider.search(trimmed, limit: limit, offset: offset)
         let state = paginationState(offset: offset, returned: results.count, requested: limit, caps: caps)
         return SearchPage(results: results, hasMore: state.hasMore, nextOffset: state.nextOffset)
@@ -262,7 +302,9 @@ public enum WebSearch {
     /// over the enabled, ready providers (see ``metaProviders(config:)``).
     static func configuredProvider(_ config: WebSearchConfig) -> WebSearchProvider? {
         if config.provider == .meta {
-            let subProviders = metaProviders(config: config).compactMap { provider(for: $0, config: config) }
+            let subProviders = metaProviders(config: config).compactMap { kind in
+                provider(for: kind, config: config).map { (kind: kind, provider: $0) }
+            }
             return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders)
         }
         return provider(for: config.provider, config: config)
@@ -434,6 +476,24 @@ public enum WebSearch {
         if lowered.hasPrefix("utm_") { return true }
         return ["fbclid", "gclid", "gbraid", "wbraid", "msclkid", "mc_cid", "mc_eid",
                 "igshid", "ref", "ref_src", "_hsenc", "_hsmi"].contains(lowered)
+    }
+
+    /// Classifies a provider's thrown error into a user-facing failure reason for meta-search
+    /// reporting: auth (401/403) = a bad key, 429 = rate limit, 402/432/433 = exhausted
+    /// quota/plan, and everything else (other HTTP, transport) = unavailable. Pure.
+    static func failureReason(for error: Error) -> SearchFailureReason {
+        guard let searchError = error as? SearchError else { return .unavailable }
+        switch searchError {
+        case .http(let code):
+            switch code {
+            case 401, 403: return .authentication
+            case 429: return .rateLimited
+            case 402, 432, 433: return .outOfQuota
+            default: return .unavailable
+            }
+        case .transport, .notConfigured:
+            return .unavailable
+        }
     }
 
     private struct SearXNGResponse: Decodable {
@@ -686,25 +746,45 @@ struct TinyFishProvider: WebSearchProvider {
 /// Meta-search — fans a query out across several sub-providers in parallel, then dedups by
 /// canonical URL and re-ranks with Reciprocal Rank Fusion so pages multiple engines return
 /// rise to the top. A sub-provider that errors (rate-limited, misconfigured, offline) simply
-/// contributes nothing — it never fails the whole search. Single page (no pagination in v1).
+/// contributes nothing — it never fails the whole search, but its outcome is reported so the
+/// UI can flag it. Single page (no pagination in v1).
 struct MetaSearchProvider: WebSearchProvider {
-    let providers: [WebSearchProvider]
+    let providers: [(kind: WebSearch.ProviderKind, provider: WebSearchProvider)]
 
     func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
-        // Fan out concurrently, keeping each engine’s results indexed by its position so the
-        // merge is deterministic regardless of which request happens to finish first.
-        let byIndex = await withTaskGroup(of: (Int, [WebSearch.Result]).self) { group in
-            for (index, provider) in providers.enumerated() {
+        await run(query, limit: limit).results
+    }
+
+    /// Fans out and returns the merged results together with a per-provider outcome (result
+    /// count / failure reason), in provider order, for reporting.
+    func run(_ query: String, limit: Int) async
+        -> (results: [WebSearch.Result], outcomes: [WebSearch.ProviderOutcome]) {
+        // Fan out concurrently, tagging each engine's results (or failure reason) with its
+        // position so both the merge and the outcome list stay deterministic.
+        let collected = await withTaskGroup(
+            of: (Int, [WebSearch.Result], WebSearch.SearchFailureReason?).self
+        ) { group in
+            for (index, sub) in providers.enumerated() {
                 group.addTask {
-                    (index, (try? await provider.search(query, limit: limit, offset: 0)) ?? [])
+                    do { return (index, try await sub.provider.search(query, limit: limit, offset: 0), nil) }
+                    catch { return (index, [], WebSearch.failureReason(for: error)) }
                 }
             }
-            var collected: [Int: [WebSearch.Result]] = [:]
-            for await (index, results) in group { collected[index] = results }
-            return collected
+            var byIndex: [Int: (results: [WebSearch.Result], reason: WebSearch.SearchFailureReason?)] = [:]
+            for await (index, results, reason) in group { byIndex[index] = (results, reason) }
+            return byIndex
         }
-        let lists = providers.indices.map { byIndex[$0] ?? [] }
-        return Array(WebSearch.mergeRRF(lists).prefix(limit))
+        var lists: [[WebSearch.Result]] = []
+        var outcomes: [WebSearch.ProviderOutcome] = []
+        for (index, sub) in providers.enumerated() {
+            let entry = collected[index]
+            let subResults = entry?.results ?? []
+            lists.append(subResults)
+            outcomes.append(WebSearch.ProviderOutcome(provider: sub.kind,
+                                                      resultCount: subResults.count,
+                                                      failureReason: entry?.reason))
+        }
+        return (Array(WebSearch.mergeRRF(lists).prefix(limit)), outcomes)
     }
 }
 

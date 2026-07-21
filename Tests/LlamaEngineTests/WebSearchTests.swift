@@ -269,8 +269,12 @@ final class WebSearchTests: XCTestCase {
             WebSearch.Result(title: "Shared", url: "https://shared.com", snippet: "b"),
             WebSearch.Result(title: "OnlyB", url: "https://b.com", snippet: "b")
         ])
-        let failing = StubProvider(results: [], fails: true)
-        let meta = MetaSearchProvider(providers: [a, b, failing])
+        let failing = StubProvider(results: [], failStatus: 429)
+        let meta = MetaSearchProvider(providers: [
+            (kind: .wikipedia, provider: a),
+            (kind: .marginalia, provider: b),
+            (kind: .brave, provider: failing)
+        ])
         let results = try await meta.search("q", limit: 10, offset: 0)
         // Shared (two engines) ranks first; the failing provider is isolated and contributes nothing.
         XCTAssertEqual(results.map { $0.url }, ["https://shared.com", "https://a.com", "https://b.com"])
@@ -283,7 +287,10 @@ final class WebSearchTests: XCTestCase {
         let b = StubProvider(results: (0..<5).map {
             WebSearch.Result(title: "B\($0)", url: "https://b.com/\($0)", snippet: "")
         })
-        let meta = MetaSearchProvider(providers: [a, b])
+        let meta = MetaSearchProvider(providers: [
+            (kind: .wikipedia, provider: a),
+            (kind: .brave, provider: b)
+        ])
         let results = try await meta.search("q", limit: 4, offset: 0)
         // Each engine returned its 4; the merged pool of 8 distinct URLs is capped to the limit.
         XCTAssertEqual(results.count, 4)
@@ -310,14 +317,46 @@ final class WebSearchTests: XCTestCase {
         XCTAssertTrue(WebSearch.metaProviders(config: config).isEmpty)
         XCTAssertFalse(WebSearch.isReady(.meta, config: config)) // no engines → meta not ready
     }
+
+    func testMetaRunReportsPerProviderOutcomes() async {
+        let ok = StubProvider(results: [
+            WebSearch.Result(title: "R1", url: "https://r1.com", snippet: ""),
+            WebSearch.Result(title: "R2", url: "https://r2.com", snippet: "")
+        ])
+        let badKey = StubProvider(results: [], failStatus: 401)
+        let limited = StubProvider(results: [], failStatus: 429)
+        let meta = MetaSearchProvider(providers: [
+            (kind: .brave, provider: ok),
+            (kind: .exa, provider: badKey),
+            (kind: .tinyfish, provider: limited)
+        ])
+        let run = await meta.run("q", limit: 10)
+        XCTAssertEqual(run.results.count, 2) // only the working engine contributed
+        XCTAssertEqual(run.outcomes.map(\.provider), [.brave, .exa, .tinyfish]) // provider order
+        XCTAssertNil(run.outcomes[0].failureReason)
+        XCTAssertEqual(run.outcomes[0].resultCount, 2)
+        XCTAssertEqual(run.outcomes[1].failureReason, .authentication)
+        XCTAssertEqual(run.outcomes[2].failureReason, .rateLimited)
+        XCTAssertEqual(run.outcomes.filter(\.failed).count, 2)
+    }
+
+    func testFailureReasonMapping() {
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(401)), .authentication)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(403)), .authentication)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(429)), .rateLimited)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(402)), .outOfQuota)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(432)), .outOfQuota)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(500)), .unavailable)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.transport("x")), .unavailable)
+    }
 }
 
-/// A canned provider for meta-search tests: returns fixed results, or throws when `fails`.
+/// A canned provider for meta-search tests: returns fixed results, or throws `.http(failStatus)`.
 private struct StubProvider: WebSearchProvider {
     let results: [WebSearch.Result]
-    var fails = false
+    var failStatus: Int? = nil
     func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
-        if fails { throw WebSearch.SearchError.http(429) }
+        if let failStatus { throw WebSearch.SearchError.http(failStatus) }
         return Array(results.prefix(limit))
     }
 }
