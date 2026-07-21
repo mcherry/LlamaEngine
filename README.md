@@ -3,7 +3,7 @@
 A **headless Swift package that provides a complete, local‑LLM AI layer** — everything an
 [Ollama](https://ollama.com)‑based chat app needs (models, streaming, RAG, vision, speech,
 image generation, web access, persistence) with **no UI baked in**. Extracted from
-[Llamatron](https://github.com/mcherry/Lammatron) so any app can depend on one
+[Llamatron](https://github.com/mcherry/Llamatron) so any app can depend on one
 feature‑complete engine and own only its presentation.
 
 The core imports **no SwiftUI and no AppKit** — the same engine can back a macOS app, a
@@ -209,5 +209,5 @@ token budgeting, calibration, retrieval, and controller guard paths are all unit
 
 ## License
 
-Developed alongside the MIT‑licensed [Llamatron](https://github.com/mcherry/Lammatron)
+Developed alongside the MIT‑licensed [Llamatron](https://github.com/mcherry/Llamatron)
 app and released as open source; see the `LICENSE` file in the repository for details.
