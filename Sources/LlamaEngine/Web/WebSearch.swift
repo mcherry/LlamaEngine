@@ -22,6 +22,20 @@ public struct WebSearchConfig: Sendable {
     }
 }
 
+/// Static pagination capabilities of a search provider — declared in code per provider
+/// (not user-configurable): how many results to request per fetch, and the hard ceiling on
+/// total results (`nil` = unbounded). A provider that can't paginate (e.g. Tavily) sets
+/// `pageSize` equal to `maxResults`, so a single fetch returns everything and "more" is
+/// never offered. Invariant: a non-nil `maxResults` is a multiple of `pageSize`.
+public struct SearchCapabilities: Sendable, Equatable {
+    public var pageSize: Int
+    public var maxResults: Int?
+    public init(pageSize: Int, maxResults: Int?) {
+        self.pageSize = pageSize
+        self.maxResults = maxResults
+    }
+}
+
 /// Web search for context, **provider-agnostic** and using only *sanctioned* APIs — never
 /// scraping a search engine's HTML (which is what gets blocked). The user picks a provider
 /// in Settings: **Wikipedia** (no key) or a self-hosted **SearXNG** instance (no key); the
@@ -43,6 +57,20 @@ public enum WebSearch {
         }
     }
 
+    /// A page of results plus whether more can be loaded and the offset to request next.
+    /// Returned by ``search(_:offset:config:)`` so the caller can append pages without
+    /// re-deriving pagination state.
+    public struct SearchPage: Sendable {
+        public let results: [Result]
+        public let hasMore: Bool
+        public let nextOffset: Int
+        public init(results: [Result], hasMore: Bool, nextOffset: Int) {
+            self.results = results
+            self.hasMore = hasMore
+            self.nextOffset = nextOffset
+        }
+    }
+
     public enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
         case none, wikipedia, searxng, marginalia, brave, tavily
         public var id: String { rawValue }
@@ -54,6 +82,20 @@ public enum WebSearch {
             case .marginalia: return "Marginalia"
             case .brave: return "Brave"
             case .tavily: return "Tavily"
+            }
+        }
+
+        /// Static pagination capabilities. Page size is uniform; only the ceiling differs.
+        /// Tavily can't paginate (`pageSize == maxResults` → one fetch); Brave/Marginalia
+        /// have API-imposed ceilings; Wikipedia/SearXNG are effectively unbounded.
+        public var searchCapabilities: SearchCapabilities {
+            switch self {
+            case .none:       return SearchCapabilities(pageSize: 20, maxResults: 0)
+            case .tavily:     return SearchCapabilities(pageSize: 20, maxResults: 20)
+            case .brave:      return SearchCapabilities(pageSize: 20, maxResults: 200)
+            case .marginalia: return SearchCapabilities(pageSize: 20, maxResults: 100)
+            case .wikipedia:  return SearchCapabilities(pageSize: 20, maxResults: nil)
+            case .searxng:    return SearchCapabilities(pageSize: 20, maxResults: nil)
             }
         }
     }
@@ -74,13 +116,39 @@ public enum WebSearch {
         }
     }
 
-    /// Runs `query` against the provider configured in Settings, returning up to `limit`
-    /// results. Throws `notConfigured` when no provider is set.
-    public static func search(_ query: String, limit: Int = 8, config: WebSearchConfig) async throws -> [Result] {
+    /// Runs `query` against the configured provider, returning the page starting at
+    /// `offset` (0 for the first page) plus whether more results can be loaded. The page
+    /// size and ceiling come from the provider's ``ProviderKind/searchCapabilities``.
+    /// Throws `notConfigured` when no provider is set.
+    public static func search(_ query: String, offset: Int = 0, config: WebSearchConfig) async throws -> SearchPage {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
+        guard !trimmed.isEmpty else { return SearchPage(results: [], hasMore: false, nextOffset: offset) }
         guard let provider = configuredProvider(config) else { throw SearchError.notConfigured }
-        return try await provider.search(trimmed, limit: limit)
+        let caps = config.provider.searchCapabilities
+        let limit = pageLimit(offset: offset, caps: caps)
+        guard limit > 0 else { return SearchPage(results: [], hasMore: false, nextOffset: offset) }
+        let results = try await provider.search(trimmed, limit: limit, offset: offset)
+        let state = paginationState(offset: offset, returned: results.count, requested: limit, caps: caps)
+        return SearchPage(results: results, hasMore: state.hasMore, nextOffset: state.nextOffset)
+    }
+
+    /// How many results to request for the page starting at `offset`, clamped so the running
+    /// total never exceeds the provider's `maxResults`. Pure, for testing.
+    static func pageLimit(offset: Int, caps: SearchCapabilities) -> Int {
+        let remaining = caps.maxResults.map { max(0, $0 - offset) } ?? caps.pageSize
+        return min(caps.pageSize, remaining)
+    }
+
+    /// Whether more results can be loaded after this page, and the offset to request next.
+    /// A short page (fewer than requested) or reaching `maxResults` stops pagination. The
+    /// next offset advances by the requested amount so page-based providers stay aligned
+    /// even when the caller de-duplicates. Pure, for testing.
+    static func paginationState(offset: Int, returned: Int, requested: Int,
+                                caps: SearchCapabilities) -> (hasMore: Bool, nextOffset: Int) {
+        let loaded = offset + returned
+        let underMax = caps.maxResults.map { loaded < $0 } ?? true
+        let fullPage = requested > 0 && returned >= requested
+        return (fullPage && underMax, offset + requested)
     }
 
     /// Whether the given configuration yields a usable search provider.
@@ -142,9 +210,11 @@ public enum WebSearch {
         }
     }
 
-    static func decodeTavily(_ data: Data, limit: Int) throws -> [Result] {
+    static func decodeTavily(_ data: Data, limit: Int, offset: Int = 0) throws -> [Result] {
         let response = try JSONDecoder().decode(TavilyResponse.self, from: data)
-        return response.results.prefix(limit).map {
+        // Tavily has no offset param, so we request `offset + limit` and drop the earlier
+        // ones here to emulate a page.
+        return response.results.dropFirst(offset).prefix(limit).map {
             Result(title: ($0.title ?? $0.url), url: $0.url, snippet: $0.content ?? "")
         }
     }
@@ -186,21 +256,22 @@ public enum WebSearch {
 
 /// A configured search backend.
 protocol WebSearchProvider: Sendable {
-    func search(_ query: String, limit: Int) async throws -> [WebSearch.Result]
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result]
 }
 
 /// A self-hosted SearXNG instance (`/search?format=json`). No API key; the user runs it.
 struct SearXNGProvider: WebSearchProvider {
     let baseURL: String
 
-    func search(_ query: String, limit: Int) async throws -> [WebSearch.Result] {
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         let trimmed = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         guard var components = URLComponents(string: trimmed + "/search") else {
             throw WebSearch.SearchError.notConfigured
         }
         components.queryItems = [
             URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "format", value: "json")
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "pageno", value: String(offset / limit + 1))
         ]
         guard let url = components.url else { throw WebSearch.SearchError.notConfigured }
         var request = URLRequest(url: url)
@@ -216,13 +287,14 @@ struct SearXNGProvider: WebSearchProvider {
 struct BraveProvider: WebSearchProvider {
     let apiKey: String
 
-    func search(_ query: String, limit: Int) async throws -> [WebSearch.Result] {
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         guard var components = URLComponents(string: "https://api.search.brave.com/res/v1/web/search") else {
             throw WebSearch.SearchError.notConfigured
         }
         components.queryItems = [
             URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "count", value: String(limit))
+            URLQueryItem(name: "count", value: String(limit)),
+            URLQueryItem(name: "offset", value: String(offset / limit))
         ]
         guard let url = components.url else { throw WebSearch.SearchError.notConfigured }
         var request = URLRequest(url: url)
@@ -237,7 +309,7 @@ struct BraveProvider: WebSearchProvider {
 /// Wikipedia via the MediaWiki search API (`action=query&list=search`). No key needed —
 /// ideal for real-world grounding (history, places, science). English Wikipedia.
 struct WikipediaProvider: WebSearchProvider {
-    func search(_ query: String, limit: Int) async throws -> [WebSearch.Result] {
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         guard var components = URLComponents(string: "https://en.wikipedia.org/w/api.php") else {
             throw WebSearch.SearchError.notConfigured
         }
@@ -246,6 +318,7 @@ struct WikipediaProvider: WebSearchProvider {
             URLQueryItem(name: "list", value: "search"),
             URLQueryItem(name: "srsearch", value: query),
             URLQueryItem(name: "srlimit", value: String(limit)),
+            URLQueryItem(name: "sroffset", value: String(offset)),
             URLQueryItem(name: "format", value: "json")
         ]
         guard let url = components.url else { throw WebSearch.SearchError.notConfigured }
@@ -262,7 +335,7 @@ struct WikipediaProvider: WebSearchProvider {
 struct TavilyProvider: WebSearchProvider {
     let apiKey: String
 
-    func search(_ query: String, limit: Int) async throws -> [WebSearch.Result] {
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         guard let url = URL(string: "https://api.tavily.com/search") else {
             throw WebSearch.SearchError.notConfigured
         }
@@ -274,10 +347,10 @@ struct TavilyProvider: WebSearchProvider {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "query": query,
-            "max_results": limit
+            "max_results": offset + limit
         ])
         let data = try await WebSearch.run(request)
-        return try WebSearch.decodeTavily(data, limit: limit)
+        return try WebSearch.decodeTavily(data, limit: limit, offset: offset)
     }
 }
 
@@ -287,13 +360,14 @@ struct TavilyProvider: WebSearchProvider {
 struct MarginaliaProvider: WebSearchProvider {
     let apiKey: String
 
-    func search(_ query: String, limit: Int) async throws -> [WebSearch.Result] {
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         guard var components = URLComponents(string: "https://api2.marginalia-search.com/search") else {
             throw WebSearch.SearchError.notConfigured
         }
         components.queryItems = [
             URLQueryItem(name: "query", value: query),
-            URLQueryItem(name: "count", value: String(limit))
+            URLQueryItem(name: "count", value: String(limit)),
+            URLQueryItem(name: "page", value: String(offset / limit + 1))
         ]
         guard let url = components.url else { throw WebSearch.SearchError.notConfigured }
         var request = URLRequest(url: url)

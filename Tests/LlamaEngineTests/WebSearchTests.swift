@@ -77,4 +77,49 @@ final class WebSearchTests: XCTestCase {
         let json = #"{"results":[{"url":"https://a.com","title":"A","description":"a"},{"url":"https://b.com","title":"B","description":"b"}]}"#
         XCTAssertEqual(try WebSearch.decodeMarginalia(Data(json.utf8), limit: 1).count, 1)
     }
+
+    // MARK: - Pagination
+
+    func testProviderCapabilities() {
+        XCTAssertEqual(WebSearch.ProviderKind.tavily.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
+        XCTAssertEqual(WebSearch.ProviderKind.brave.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 200))
+        XCTAssertEqual(WebSearch.ProviderKind.marginalia.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 100))
+        XCTAssertNil(WebSearch.ProviderKind.wikipedia.searchCapabilities.maxResults)
+        XCTAssertNil(WebSearch.ProviderKind.searxng.searchCapabilities.maxResults)
+    }
+
+    func testPageLimitClampsToMax() {
+        let unbounded = SearchCapabilities(pageSize: 20, maxResults: nil)
+        XCTAssertEqual(WebSearch.pageLimit(offset: 0, caps: unbounded), 20)
+        XCTAssertEqual(WebSearch.pageLimit(offset: 100, caps: unbounded), 20)
+
+        let capped = SearchCapabilities(pageSize: 20, maxResults: 20)
+        XCTAssertEqual(WebSearch.pageLimit(offset: 0, caps: capped), 20)
+        XCTAssertEqual(WebSearch.pageLimit(offset: 20, caps: capped), 0) // ceiling reached
+    }
+
+    func testPaginationStateHasMoreWhenFullPageUnderMax() {
+        let caps = SearchCapabilities(pageSize: 20, maxResults: 100)
+        let state = WebSearch.paginationState(offset: 0, returned: 20, requested: 20, caps: caps)
+        XCTAssertTrue(state.hasMore)
+        XCTAssertEqual(state.nextOffset, 20)
+    }
+
+    func testPaginationStateStopsAtMax() {
+        let caps = SearchCapabilities(pageSize: 20, maxResults: 20) // Tavily-like
+        let state = WebSearch.paginationState(offset: 0, returned: 20, requested: 20, caps: caps)
+        XCTAssertFalse(state.hasMore) // loaded == max
+    }
+
+    func testPaginationStateStopsOnShortPage() {
+        let caps = SearchCapabilities(pageSize: 20, maxResults: nil)
+        let state = WebSearch.paginationState(offset: 0, returned: 12, requested: 20, caps: caps)
+        XCTAssertFalse(state.hasMore) // fewer than requested → end of results
+    }
+
+    func testDecodeTavilyOffsetSlicesResults() throws {
+        let json = #"{"results":[{"url":"https://a.com","title":"A"},{"url":"https://b.com","title":"B"},{"url":"https://c.com","title":"C"}]}"#
+        let sliced = try WebSearch.decodeTavily(Data(json.utf8), limit: 2, offset: 1)
+        XCTAssertEqual(sliced.map(\.url), ["https://b.com", "https://c.com"])
+    }
 }
