@@ -14,6 +14,8 @@ public struct WebSearchConfig: Sendable {
     /// Providers included in meta-search's parallel fan-out (ignored by single-provider
     /// searches). Defaults to every provider in the catalog.
     public var enabledProviders: Set<WebSearch.ProviderKind>
+    /// How meta-search combines its providers (fan-out vs. sequential fallback).
+    public var metaMode: WebSearch.MetaSearchMode
 
     public init(provider: WebSearch.ProviderKind = .none,
                 searxngURL: String = "",
@@ -23,7 +25,8 @@ public struct WebSearchConfig: Sendable {
                 linkupAPIKey: String = "",
                 tinyfishAPIKey: String = "",
                 marginaliaAPIKey: String = "public",
-                enabledProviders: Set<WebSearch.ProviderKind> = Set(WebSearch.catalog)) {
+                enabledProviders: Set<WebSearch.ProviderKind> = Set(WebSearch.catalog),
+                metaMode: WebSearch.MetaSearchMode = .comprehensive) {
         self.provider = provider
         self.searxngURL = searxngURL
         self.braveAPIKey = braveAPIKey
@@ -33,6 +36,7 @@ public struct WebSearchConfig: Sendable {
         self.tinyfishAPIKey = tinyfishAPIKey
         self.marginaliaAPIKey = marginaliaAPIKey
         self.enabledProviders = enabledProviders
+        self.metaMode = metaMode
     }
 }
 
@@ -294,6 +298,29 @@ public enum WebSearch {
         case none, apiKey, instanceURL
     }
 
+    /// How meta-search combines its providers. Fast/Resilient query sequentially (catalog
+    /// order = free-first) and stop at the first engine with results; Comprehensive fans out
+    /// to every enabled engine at once and merges. Resilient additionally retries a transient
+    /// failure once before moving on.
+    public enum MetaSearchMode: String, CaseIterable, Identifiable, Sendable {
+        case comprehensive, fast, resilient
+        public var id: String { rawValue }
+        public var label: String {
+            switch self {
+            case .comprehensive: return "Comprehensive"
+            case .fast: return "Fast"
+            case .resilient: return "Resilient"
+            }
+        }
+        public var summary: String {
+            switch self {
+            case .comprehensive: return "Searches every enabled engine at once and merges the results — broadest coverage."
+            case .fast: return "Tries engines one at a time and stops at the first with results — fewest requests."
+            case .resilient: return "Like Fast, but retries a flaky engine before moving on — best on spotty networks."
+            }
+        }
+    }
+
     /// The providers meta-search will actually query, in catalog order: those the user has
     /// enabled *and* that have their credential/URL ready. Drives both the fan-out and the
     /// “meta will use these” hint in Settings.
@@ -309,7 +336,9 @@ public enum WebSearch {
             let subProviders = metaProviders(config: config).compactMap { kind in
                 provider(for: kind, config: config).map { (kind: kind, provider: $0) }
             }
-            return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders, rateLimiter: metaRateLimiter)
+            return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders,
+                                                                    rateLimiter: metaRateLimiter,
+                                                                    mode: config.metaMode)
         }
         return provider(for: config.provider, config: config)
     }
@@ -754,23 +783,29 @@ struct TinyFishProvider: WebSearchProvider {
     }
 }
 
-/// Meta-search — fans a query out across several sub-providers in parallel, then dedups by
-/// canonical URL and re-ranks with Reciprocal Rank Fusion so pages multiple engines return
-/// rise to the top. A sub-provider that errors (rate-limited, misconfigured, offline) simply
-/// contributes nothing — it never fails the whole search, but its outcome is reported so the
-/// UI can flag it. Providers that recently rate-limited or ran out of quota are skipped via
-/// the shared ``MetaRateLimiter`` until they cool down. Single page (no pagination in v1).
+/// Meta-search — combines several sub-providers per the chosen ``WebSearch/MetaSearchMode``:
+/// Comprehensive fans out to every available engine in parallel and RRF-merges the union;
+/// Fast/Resilient query sequentially (catalog order = free-first) and stop at the first engine
+/// with results, with Resilient retrying a transient failure once. Providers that recently
+/// rate-limited or ran out of quota are skipped via the shared ``MetaRateLimiter`` until they
+/// cool down; every provider's outcome is reported so the UI can flag failures. Single page.
 struct MetaSearchProvider: WebSearchProvider {
     let providers: [(kind: WebSearch.ProviderKind, provider: WebSearchProvider)]
     let rateLimiter: MetaRateLimiter
+    var mode: WebSearch.MetaSearchMode = .comprehensive
+
+    /// One provider's attempt: its results, plus a failure reason + retry-after when it errored.
+    private typealias Attempt = (results: [WebSearch.Result],
+                                 reason: WebSearch.SearchFailureReason?,
+                                 retryAfter: TimeInterval?)
 
     func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         await run(query, limit: limit).results
     }
 
-    /// Fans out to the providers not currently cooling down, records each result into the
-    /// shared rate-limit gate, and returns the merged results plus a per-provider outcome
-    /// (result count / failure reason / cooldown), in provider order, for reporting.
+    /// Runs the fan-out or fallback (per `mode`) over the providers not currently cooling down,
+    /// records each result into the shared gate, and returns the merged results plus a
+    /// per-provider outcome (count / failure reason / cooldown), in provider order.
     func run(_ query: String, limit: Int) async
         -> (results: [WebSearch.Result], outcomes: [WebSearch.ProviderOutcome]) {
         let now = Date()
@@ -778,8 +813,45 @@ struct MetaSearchProvider: WebSearchProvider {
         let available = Set(await rateLimiter.availability(kinds, now: now).available)
         let toQuery = providers.filter { available.contains($0.kind) }
 
-        // Fan out to the available providers only, tagging each engine's results (or failure
-        // reason + retry-after) with its position so the merge stays deterministic.
+        let merged: [WebSearch.Result]
+        let queried: [WebSearch.ProviderKind: Attempt]
+        switch mode {
+        case .comprehensive:
+            (merged, queried) = await fanOut(toQuery, query: query, limit: limit)
+        case .fast:
+            (merged, queried) = await fallback(toQuery, query: query, limit: limit, retryTransient: false)
+        case .resilient:
+            (merged, queried) = await fallback(toQuery, query: query, limit: limit, retryTransient: true)
+        }
+
+        // Record queried outcomes into the shared gate (success clears, limits park), then
+        // re-read the cooldowns so freshly-limited providers report their reset time.
+        let records = queried.map { (provider: $0.key, reason: $0.value.reason, retryAfter: $0.value.retryAfter) }
+        await rateLimiter.record(records, now: now)
+        let cooling = await rateLimiter.availability(kinds, now: now).cooling
+
+        // Report an outcome for every provider, in provider order: cooling ones carry their
+        // reason + remaining; queried ones carry their count / failure; the rest (not reached
+        // in a fallback run) are reported as clean no-ops.
+        let outcomes = providers.map { sub -> WebSearch.ProviderOutcome in
+            if let cool = cooling[sub.kind] {
+                return WebSearch.ProviderOutcome(provider: sub.kind, resultCount: 0,
+                                                 failureReason: cool.reason, retryAfter: cool.remaining)
+            }
+            if let attempt = queried[sub.kind] {
+                return WebSearch.ProviderOutcome(provider: sub.kind, resultCount: attempt.results.count,
+                                                 failureReason: attempt.reason)
+            }
+            return WebSearch.ProviderOutcome(provider: sub.kind, resultCount: 0, failureReason: nil)
+        }
+        return (Array(merged.prefix(limit)), outcomes)
+    }
+
+    /// Comprehensive: query every available provider in parallel, tagging each result (or
+    /// failure) with its position, and RRF-merge the union.
+    private func fanOut(_ toQuery: [(kind: WebSearch.ProviderKind, provider: WebSearchProvider)],
+                        query: String, limit: Int) async
+        -> (results: [WebSearch.Result], queried: [WebSearch.ProviderKind: Attempt]) {
         let collected = await withTaskGroup(
             of: (Int, [WebSearch.Result], WebSearch.SearchFailureReason?, TimeInterval?).self
         ) { group in
@@ -789,39 +861,50 @@ struct MetaSearchProvider: WebSearchProvider {
                     catch { return (index, [], WebSearch.failureReason(for: error), WebSearch.retryAfter(for: error)) }
                 }
             }
-            var byIndex: [Int: (results: [WebSearch.Result], reason: WebSearch.SearchFailureReason?, retryAfter: TimeInterval?)] = [:]
-            for await (index, results, reason, retryAfter) in group { byIndex[index] = (results, reason, retryAfter) }
+            var byIndex: [Int: Attempt] = [:]
+            for await (index, results, reason, retryAfter) in group {
+                byIndex[index] = (results: results, reason: reason, retryAfter: retryAfter)
+            }
             return byIndex
         }
-
-        // Record every queried provider's outcome into the shared gate (success clears a
-        // cooldown; a rate-limit / out-of-quota parks it), then re-read the cooldowns.
-        var records: [(provider: WebSearch.ProviderKind, reason: WebSearch.SearchFailureReason?, retryAfter: TimeInterval?)] = []
-        var queried: [WebSearch.ProviderKind: (results: [WebSearch.Result], reason: WebSearch.SearchFailureReason?)] = [:]
+        var queried: [WebSearch.ProviderKind: Attempt] = [:]
+        var lists: [[WebSearch.Result]] = []
         for (index, sub) in toQuery.enumerated() {
-            let entry = collected[index]
-            records.append((provider: sub.kind, reason: entry?.reason, retryAfter: entry?.retryAfter))
-            queried[sub.kind] = (entry?.results ?? [], entry?.reason)
+            let attempt = collected[index] ?? (results: [], reason: .unavailable, retryAfter: nil)
+            queried[sub.kind] = attempt
+            lists.append(attempt.results)
         }
-        await rateLimiter.record(records, now: now)
-        let cooling = await rateLimiter.availability(kinds, now: now).cooling
+        return (WebSearch.mergeRRF(lists), queried)
+    }
 
-        // Merge only the queried successes, in provider order.
-        let lists = providers.map { queried[$0.kind]?.results ?? [] }
+    /// Fast / Resilient: query available providers one at a time (catalog order = free-first)
+    /// and stop at the first with results. Resilient retries a transient failure once.
+    private func fallback(_ toQuery: [(kind: WebSearch.ProviderKind, provider: WebSearchProvider)],
+                          query: String, limit: Int, retryTransient: Bool) async
+        -> (results: [WebSearch.Result], queried: [WebSearch.ProviderKind: Attempt]) {
+        var queried: [WebSearch.ProviderKind: Attempt] = [:]
+        var winner: [WebSearch.Result] = []
+        for sub in toQuery {
+            let attempt = await attemptSearch(sub.provider, query: query, limit: limit, retryTransient: retryTransient)
+            queried[sub.kind] = attempt
+            if !attempt.results.isEmpty { winner = attempt.results; break }
+        }
+        return (winner, queried)
+    }
 
-        // Report an outcome for every provider: cooling ones (skipped this run or just limited)
-        // carry their reason + remaining time; queried ones carry their count / failure.
-        let outcomes = providers.map { sub -> WebSearch.ProviderOutcome in
-            if let cool = cooling[sub.kind] {
-                return WebSearch.ProviderOutcome(provider: sub.kind, resultCount: 0,
-                                                 failureReason: cool.reason, retryAfter: cool.remaining)
+    /// One provider attempt, retrying once on a transient (non-rate-limit) error when asked.
+    private func attemptSearch(_ provider: WebSearchProvider, query: String, limit: Int,
+                               retryTransient: Bool) async -> Attempt {
+        do {
+            return (results: try await provider.search(query, limit: limit, offset: 0), reason: nil, retryAfter: nil)
+        } catch {
+            let reason = WebSearch.failureReason(for: error)
+            if retryTransient, reason == .unavailable {
+                do { return (results: try await provider.search(query, limit: limit, offset: 0), reason: nil, retryAfter: nil) }
+                catch { return (results: [], reason: WebSearch.failureReason(for: error), retryAfter: WebSearch.retryAfter(for: error)) }
             }
-            let entry = queried[sub.kind]
-            return WebSearch.ProviderOutcome(provider: sub.kind,
-                                             resultCount: entry?.results.count ?? 0,
-                                             failureReason: entry?.reason)
+            return (results: [], reason: reason, retryAfter: WebSearch.retryAfter(for: error))
         }
-        return (Array(WebSearch.mergeRRF(lists).prefix(limit)), outcomes)
     }
 }
 

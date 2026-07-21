@@ -406,6 +406,59 @@ final class WebSearchTests: XCTestCase {
         XCTAssertEqual(second.outcomes.first { $0.provider == .brave }?.failureReason, .rateLimited)
         XCTAssertEqual(second.results.map(\.url), ["https://s.com"])  // wikipedia still contributes
     }
+
+    func testFastModeStopsAtFirstResult() async {
+        let first = CallCountingStub(results: [WebSearch.Result(title: "F", url: "https://f.com", snippet: "")])
+        let second = CallCountingStub(results: [WebSearch.Result(title: "S", url: "https://s.com", snippet: "")])
+        let meta = MetaSearchProvider(providers: [
+            (kind: .wikipedia, provider: first),
+            (kind: .marginalia, provider: second)
+        ], rateLimiter: MetaRateLimiter(), mode: .fast)
+        let run = await meta.run("q", limit: 10)
+        XCTAssertEqual(run.results.map(\.url), ["https://f.com"])   // first engine won
+        let firstCalls = await first.count()
+        let secondCalls = await second.count()
+        XCTAssertEqual(firstCalls, 1)
+        XCTAssertEqual(secondCalls, 0)                              // second never queried
+    }
+
+    func testFastModeFallsPastEmptyProvider() async {
+        let empty = CallCountingStub(results: [])   // succeeds with no results
+        let hit = CallCountingStub(results: [WebSearch.Result(title: "H", url: "https://h.com", snippet: "")])
+        let meta = MetaSearchProvider(providers: [
+            (kind: .wikipedia, provider: empty),
+            (kind: .marginalia, provider: hit)
+        ], rateLimiter: MetaRateLimiter(), mode: .fast)
+        let run = await meta.run("q", limit: 10)
+        XCTAssertEqual(run.results.map(\.url), ["https://h.com"])   // fell through the empty one
+        let emptyCalls = await empty.count()
+        let hitCalls = await hit.count()
+        XCTAssertEqual(emptyCalls, 1)
+        XCTAssertEqual(hitCalls, 1)
+    }
+
+    func testResilientRetriesTransientFailure() async {
+        let flaky = CallCountingStub(results: [WebSearch.Result(title: "R", url: "https://r.com", snippet: "")],
+                                     failStatus: 500, failFirst: 1)   // fails once, then succeeds
+        let meta = MetaSearchProvider(providers: [(kind: .wikipedia, provider: flaky)],
+                                      rateLimiter: MetaRateLimiter(), mode: .resilient)
+        let run = await meta.run("q", limit: 10)
+        XCTAssertEqual(run.results.map(\.url), ["https://r.com"])   // retried and succeeded
+        let calls = await flaky.count()
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testFastDoesNotRetryTransientFailure() async {
+        let flaky = CallCountingStub(results: [WebSearch.Result(title: "R", url: "https://r.com", snippet: "")],
+                                     failStatus: 500, failFirst: 1)
+        let meta = MetaSearchProvider(providers: [(kind: .wikipedia, provider: flaky)],
+                                      rateLimiter: MetaRateLimiter(), mode: .fast)
+        let run = await meta.run("q", limit: 10)
+        XCTAssertTrue(run.results.isEmpty)                          // no retry → no results
+        let calls = await flaky.count()
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(run.outcomes.first { $0.provider == .wikipedia }?.failureReason, .unavailable)
+    }
 }
 
 /// A canned provider for meta-search tests: returns fixed results, or throws `.http(failStatus)`.
@@ -420,20 +473,22 @@ private struct StubProvider: WebSearchProvider {
 }
 
 /// A stateful stub that counts how many times it was queried — for asserting a cooling-down
-/// provider isn't re-hit on the next run.
+/// provider isn't re-hit, and for retry/fallback tests. Fails its first `failFirst` calls.
 private actor CallCountingStub: WebSearchProvider {
     private var calls = 0
     let results: [WebSearch.Result]
     let failStatus: Int?
     let retryAfter: TimeInterval?
-    init(results: [WebSearch.Result] = [], failStatus: Int? = nil, retryAfter: TimeInterval? = nil) {
+    let failFirst: Int
+    init(results: [WebSearch.Result] = [], failStatus: Int? = nil, retryAfter: TimeInterval? = nil, failFirst: Int = .max) {
         self.results = results
         self.failStatus = failStatus
         self.retryAfter = retryAfter
+        self.failFirst = failFirst
     }
     func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         calls += 1
-        if let failStatus { throw WebSearch.SearchError.http(failStatus, retryAfter: retryAfter) }
+        if let failStatus, calls <= failFirst { throw WebSearch.SearchError.http(failStatus, retryAfter: retryAfter) }
         return Array(results.prefix(limit))
     }
     func count() -> Int { calls }
