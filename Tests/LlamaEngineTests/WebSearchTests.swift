@@ -274,7 +274,7 @@ final class WebSearchTests: XCTestCase {
             (kind: .wikipedia, provider: a),
             (kind: .marginalia, provider: b),
             (kind: .brave, provider: failing)
-        ])
+        ], rateLimiter: MetaRateLimiter())
         let results = try await meta.search("q", limit: 10, offset: 0)
         // Shared (two engines) ranks first; the failing provider is isolated and contributes nothing.
         XCTAssertEqual(results.map { $0.url }, ["https://shared.com", "https://a.com", "https://b.com"])
@@ -290,7 +290,7 @@ final class WebSearchTests: XCTestCase {
         let meta = MetaSearchProvider(providers: [
             (kind: .wikipedia, provider: a),
             (kind: .brave, provider: b)
-        ])
+        ], rateLimiter: MetaRateLimiter())
         let results = try await meta.search("q", limit: 4, offset: 0)
         // Each engine returned its 4; the merged pool of 8 distinct URLs is capped to the limit.
         XCTAssertEqual(results.count, 4)
@@ -329,7 +329,7 @@ final class WebSearchTests: XCTestCase {
             (kind: .brave, provider: ok),
             (kind: .exa, provider: badKey),
             (kind: .tinyfish, provider: limited)
-        ])
+        ], rateLimiter: MetaRateLimiter())
         let run = await meta.run("q", limit: 10)
         XCTAssertEqual(run.results.count, 2) // only the working engine contributed
         XCTAssertEqual(run.outcomes.map(\.provider), [.brave, .exa, .tinyfish]) // provider order
@@ -341,13 +341,70 @@ final class WebSearchTests: XCTestCase {
     }
 
     func testFailureReasonMapping() {
-        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(401)), .authentication)
-        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(403)), .authentication)
-        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(429)), .rateLimited)
-        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(402)), .outOfQuota)
-        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(432)), .outOfQuota)
-        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(500)), .unavailable)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(401, retryAfter: nil)), .authentication)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(403, retryAfter: nil)), .authentication)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(429, retryAfter: 30)), .rateLimited)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(402, retryAfter: nil)), .outOfQuota)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(432, retryAfter: nil)), .outOfQuota)
+        XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.http(500, retryAfter: nil)), .unavailable)
         XCTAssertEqual(WebSearch.failureReason(for: WebSearch.SearchError.transport("x")), .unavailable)
+    }
+
+    func testRetryAfterExtraction() {
+        XCTAssertEqual(WebSearch.retryAfter(for: WebSearch.SearchError.http(429, retryAfter: 30)), 30)
+        XCTAssertNil(WebSearch.retryAfter(for: WebSearch.SearchError.http(500, retryAfter: nil)))
+        XCTAssertNil(WebSearch.retryAfter(for: WebSearch.SearchError.transport("x")))
+    }
+
+    func testRetryAfterHeaderParsing() {
+        let url = URL(string: "https://x.com")!
+        let with = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "45"])!
+        XCTAssertEqual(WebSearch.retryAfterSeconds(from: with), 45)
+        let without = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: [:])!
+        XCTAssertNil(WebSearch.retryAfterSeconds(from: without))
+        let nonNumeric = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "soon"])!
+        XCTAssertNil(WebSearch.retryAfterSeconds(from: nonNumeric))
+    }
+
+    func testRateLimitGateParksAndExpires() {
+        var gate = RateLimitGate(defaultBackoff: 60, quotaCooldown: 3600)
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        gate.record(.brave, reason: .rateLimited, retryAfter: 30, now: t0)
+        XCTAssertFalse(gate.isAvailable(.brave, now: t0))
+        XCTAssertEqual(gate.status(.brave, now: t0)?.remaining, 30)
+        XCTAssertEqual(gate.status(.brave, now: t0)?.reason, .rateLimited)
+        XCTAssertTrue(gate.isAvailable(.brave, now: t0.addingTimeInterval(31)))  // cooldown elapsed
+        gate.record(.tavily, reason: .rateLimited, retryAfter: nil, now: t0)     // no header → default
+        XCTAssertEqual(gate.status(.tavily, now: t0)?.remaining, 60)
+        gate.record(.exa, reason: .outOfQuota, now: t0)
+        XCTAssertEqual(gate.status(.exa, now: t0)?.remaining, 3600)
+        gate.record(.linkup, reason: .authentication, now: t0)                   // no cooldown
+        gate.record(.tinyfish, reason: .unavailable, now: t0)                    // no cooldown
+        XCTAssertTrue(gate.isAvailable(.linkup, now: t0))
+        XCTAssertTrue(gate.isAvailable(.tinyfish, now: t0))
+        gate.record(.brave, reason: nil, now: t0)                                // success clears
+        XCTAssertTrue(gate.isAvailable(.brave, now: t0))
+    }
+
+    func testMetaSkipsCoolingProviderOnNextRun() async {
+        let steady = StubProvider(results: [WebSearch.Result(title: "S", url: "https://s.com", snippet: "")])
+        let flaky = CallCountingStub(failStatus: 429, retryAfter: 300)
+        let meta = MetaSearchProvider(providers: [
+            (kind: .wikipedia, provider: steady),
+            (kind: .brave, provider: flaky)
+        ], rateLimiter: MetaRateLimiter())
+
+        let first = await meta.run("q", limit: 10)
+        XCTAssertEqual(first.outcomes.first { $0.provider == .brave }?.failureReason, .rateLimited)
+        XCTAssertNotNil(first.outcomes.first { $0.provider == .brave }?.retryAfter)
+        let callsAfterFirst = await flaky.count()
+        XCTAssertEqual(callsAfterFirst, 1)
+
+        let second = await meta.run("q", limit: 10)
+        let callsAfterSecond = await flaky.count()
+        XCTAssertEqual(callsAfterSecond, 1)  // cooling down → not re-hit
+        XCTAssertEqual(second.outcomes.first { $0.provider == .brave }?.failureReason, .rateLimited)
+        XCTAssertEqual(second.results.map(\.url), ["https://s.com"])  // wikipedia still contributes
     }
 }
 
@@ -355,8 +412,29 @@ final class WebSearchTests: XCTestCase {
 private struct StubProvider: WebSearchProvider {
     let results: [WebSearch.Result]
     var failStatus: Int? = nil
+    var retryAfter: TimeInterval? = nil
     func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
-        if let failStatus { throw WebSearch.SearchError.http(failStatus) }
+        if let failStatus { throw WebSearch.SearchError.http(failStatus, retryAfter: retryAfter) }
         return Array(results.prefix(limit))
     }
+}
+
+/// A stateful stub that counts how many times it was queried — for asserting a cooling-down
+/// provider isn't re-hit on the next run.
+private actor CallCountingStub: WebSearchProvider {
+    private var calls = 0
+    let results: [WebSearch.Result]
+    let failStatus: Int?
+    let retryAfter: TimeInterval?
+    init(results: [WebSearch.Result] = [], failStatus: Int? = nil, retryAfter: TimeInterval? = nil) {
+        self.results = results
+        self.failStatus = failStatus
+        self.retryAfter = retryAfter
+    }
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
+        calls += 1
+        if let failStatus { throw WebSearch.SearchError.http(failStatus, retryAfter: retryAfter) }
+        return Array(results.prefix(limit))
+    }
+    func count() -> Int { calls }
 }

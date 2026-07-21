@@ -109,12 +109,16 @@ public enum WebSearch {
         public let resultCount: Int
         /// Nil when the provider succeeded; otherwise why it contributed nothing.
         public let failureReason: SearchFailureReason?
+        /// Seconds until the provider will be retried while it's cooling down (nil otherwise).
+        public let retryAfter: TimeInterval?
         public var id: String { provider.rawValue }
         public var failed: Bool { failureReason != nil }
-        public init(provider: ProviderKind, resultCount: Int, failureReason: SearchFailureReason?) {
+        public init(provider: ProviderKind, resultCount: Int,
+                    failureReason: SearchFailureReason?, retryAfter: TimeInterval? = nil) {
             self.provider = provider
             self.resultCount = resultCount
             self.failureReason = failureReason
+            self.retryAfter = retryAfter
         }
     }
 
@@ -211,13 +215,13 @@ public enum WebSearch {
 
     public enum SearchError: LocalizedError {
         case notConfigured
-        case http(Int)
+        case http(Int, retryAfter: TimeInterval?)
         case transport(String)
         public var errorDescription: String? {
             switch self {
             case .notConfigured:
                 return "No search provider is set up. Choose one in Settings → Web Search."
-            case .http(let code):
+            case .http(let code, _):
                 return "The search provider returned an error (HTTP \(code))."
             case .transport(let message):
                 return message
@@ -305,7 +309,7 @@ public enum WebSearch {
             let subProviders = metaProviders(config: config).compactMap { kind in
                 provider(for: kind, config: config).map { (kind: kind, provider: $0) }
             }
-            return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders)
+            return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders, rateLimiter: metaRateLimiter)
         }
         return provider(for: config.provider, config: config)
     }
@@ -484,7 +488,7 @@ public enum WebSearch {
     static func failureReason(for error: Error) -> SearchFailureReason {
         guard let searchError = error as? SearchError else { return .unavailable }
         switch searchError {
-        case .http(let code):
+        case .http(let code, _):
             switch code {
             case 401, 403: return .authentication
             case 429: return .rateLimited
@@ -494,6 +498,13 @@ public enum WebSearch {
         case .transport, .notConfigured:
             return .unavailable
         }
+    }
+
+    /// The `Retry-After` delay (seconds) carried by a rate-limit error, if any. Feeds the
+    /// cooldown gate so meta-search waits out the provider's own reset.
+    static func retryAfter(for error: Error) -> TimeInterval? {
+        if case let SearchError.http(_, retryAfter) = error { return retryAfter }
+        return nil
     }
 
     private struct SearXNGResponse: Decodable {
@@ -747,42 +758,68 @@ struct TinyFishProvider: WebSearchProvider {
 /// canonical URL and re-ranks with Reciprocal Rank Fusion so pages multiple engines return
 /// rise to the top. A sub-provider that errors (rate-limited, misconfigured, offline) simply
 /// contributes nothing — it never fails the whole search, but its outcome is reported so the
-/// UI can flag it. Single page (no pagination in v1).
+/// UI can flag it. Providers that recently rate-limited or ran out of quota are skipped via
+/// the shared ``MetaRateLimiter`` until they cool down. Single page (no pagination in v1).
 struct MetaSearchProvider: WebSearchProvider {
     let providers: [(kind: WebSearch.ProviderKind, provider: WebSearchProvider)]
+    let rateLimiter: MetaRateLimiter
 
     func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
         await run(query, limit: limit).results
     }
 
-    /// Fans out and returns the merged results together with a per-provider outcome (result
-    /// count / failure reason), in provider order, for reporting.
+    /// Fans out to the providers not currently cooling down, records each result into the
+    /// shared rate-limit gate, and returns the merged results plus a per-provider outcome
+    /// (result count / failure reason / cooldown), in provider order, for reporting.
     func run(_ query: String, limit: Int) async
         -> (results: [WebSearch.Result], outcomes: [WebSearch.ProviderOutcome]) {
-        // Fan out concurrently, tagging each engine's results (or failure reason) with its
-        // position so both the merge and the outcome list stay deterministic.
+        let now = Date()
+        let kinds = providers.map(\.kind)
+        let available = Set(await rateLimiter.availability(kinds, now: now).available)
+        let toQuery = providers.filter { available.contains($0.kind) }
+
+        // Fan out to the available providers only, tagging each engine's results (or failure
+        // reason + retry-after) with its position so the merge stays deterministic.
         let collected = await withTaskGroup(
-            of: (Int, [WebSearch.Result], WebSearch.SearchFailureReason?).self
+            of: (Int, [WebSearch.Result], WebSearch.SearchFailureReason?, TimeInterval?).self
         ) { group in
-            for (index, sub) in providers.enumerated() {
+            for (index, sub) in toQuery.enumerated() {
                 group.addTask {
-                    do { return (index, try await sub.provider.search(query, limit: limit, offset: 0), nil) }
-                    catch { return (index, [], WebSearch.failureReason(for: error)) }
+                    do { return (index, try await sub.provider.search(query, limit: limit, offset: 0), nil, nil) }
+                    catch { return (index, [], WebSearch.failureReason(for: error), WebSearch.retryAfter(for: error)) }
                 }
             }
-            var byIndex: [Int: (results: [WebSearch.Result], reason: WebSearch.SearchFailureReason?)] = [:]
-            for await (index, results, reason) in group { byIndex[index] = (results, reason) }
+            var byIndex: [Int: (results: [WebSearch.Result], reason: WebSearch.SearchFailureReason?, retryAfter: TimeInterval?)] = [:]
+            for await (index, results, reason, retryAfter) in group { byIndex[index] = (results, reason, retryAfter) }
             return byIndex
         }
-        var lists: [[WebSearch.Result]] = []
-        var outcomes: [WebSearch.ProviderOutcome] = []
-        for (index, sub) in providers.enumerated() {
+
+        // Record every queried provider's outcome into the shared gate (success clears a
+        // cooldown; a rate-limit / out-of-quota parks it), then re-read the cooldowns.
+        var records: [(provider: WebSearch.ProviderKind, reason: WebSearch.SearchFailureReason?, retryAfter: TimeInterval?)] = []
+        var queried: [WebSearch.ProviderKind: (results: [WebSearch.Result], reason: WebSearch.SearchFailureReason?)] = [:]
+        for (index, sub) in toQuery.enumerated() {
             let entry = collected[index]
-            let subResults = entry?.results ?? []
-            lists.append(subResults)
-            outcomes.append(WebSearch.ProviderOutcome(provider: sub.kind,
-                                                      resultCount: subResults.count,
-                                                      failureReason: entry?.reason))
+            records.append((provider: sub.kind, reason: entry?.reason, retryAfter: entry?.retryAfter))
+            queried[sub.kind] = (entry?.results ?? [], entry?.reason)
+        }
+        await rateLimiter.record(records, now: now)
+        let cooling = await rateLimiter.availability(kinds, now: now).cooling
+
+        // Merge only the queried successes, in provider order.
+        let lists = providers.map { queried[$0.kind]?.results ?? [] }
+
+        // Report an outcome for every provider: cooling ones (skipped this run or just limited)
+        // carry their reason + remaining time; queried ones carry their count / failure.
+        let outcomes = providers.map { sub -> WebSearch.ProviderOutcome in
+            if let cool = cooling[sub.kind] {
+                return WebSearch.ProviderOutcome(provider: sub.kind, resultCount: 0,
+                                                 failureReason: cool.reason, retryAfter: cool.remaining)
+            }
+            let entry = queried[sub.kind]
+            return WebSearch.ProviderOutcome(provider: sub.kind,
+                                             resultCount: entry?.results.count ?? 0,
+                                             failureReason: entry?.reason)
         }
         return (Array(WebSearch.mergeRRF(lists).prefix(limit)), outcomes)
     }
@@ -794,7 +831,7 @@ extension WebSearch {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                throw SearchError.http(http.statusCode)
+                throw SearchError.http(http.statusCode, retryAfter: retryAfterSeconds(from: http))
             }
             return data
         } catch let error as SearchError {
@@ -802,5 +839,14 @@ extension WebSearch {
         } catch {
             throw SearchError.transport(error.localizedDescription)
         }
+    }
+
+    /// Parses a `Retry-After` header expressed in delta-seconds (the form these APIs send); an
+    /// HTTP-date value is ignored. Returns nil when the header is absent or non-numeric.
+    static func retryAfterSeconds(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+                .trimmingCharacters(in: .whitespaces),
+              let seconds = TimeInterval(value) else { return nil }
+        return max(0, seconds)
     }
 }
