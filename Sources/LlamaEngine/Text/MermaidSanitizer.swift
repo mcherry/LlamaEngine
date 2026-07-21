@@ -1,8 +1,9 @@
 import Foundation
 
 /// Repairs the most common Mermaid **flowchart** syntax error in LLM output: node
-/// labels that contain bracket characters (`(`, `)`, `[`, `]`, `{`, `}`) without being
-/// quoted, which the Mermaid parser rejects (e.g. `D[Use weapon (knife, bat)]`). The
+/// labels that contain bracket or operator characters (the brackets plus `~`, `<`, `>`,
+/// `&`, `;`, `#`, and backtick) without being quoted, which the Mermaid parser rejects
+/// (e.g. `D[Use weapon (knife, bat)]` or `E[Mass: >100 masses]`). The
 /// fix is to wrap such labels in double quotes — `D["Use weapon (knife, bat)"]` — which
 /// is semantically identical to an unquoted label.
 ///
@@ -13,8 +14,16 @@ import Foundation
 /// the repaired version when the original fails to parse.
 public enum MermaidSanitizer {
     /// Characters that force a label to be quoted (structural tokens the parser would
-    /// otherwise try to interpret).
-    private static let triggers: Set<Character> = ["(", ")", "[", "]", "{", "}"]
+    /// otherwise try to interpret). Beyond the brackets these include Mermaid operators
+    /// that are unrecognized inside an unquoted label: `~`, `<`/`>` (link and flag
+    /// tokens), `&` (node list), `;` (statement end), `#` (entity code) and backtick.
+    /// Quoting is semantically identical, so quoting extra labels is always safe. Note
+    /// this is only ever applied to text already found *inside* a node shape, so `style`
+    /// / `linkStyle` lines and `#` colour codes are untouched.
+    private static let triggers: Set<Character> = [
+        "(", ")", "[", "]", "{", "}",
+        "~", "<", ">", "&", ";", "#", "`"
+    ]
 
     /// Node-shape opening delimiters (longest first) paired with their candidate
     /// closing delimiters. Ordering matters so `[[` is matched before `[`, etc.

@@ -64,6 +64,20 @@ final class MermaidSanitizerTests: XCTestCase {
         XCTAssertEqual(MermaidSanitizer.repair(src), src)
     }
 
+    func testQuotesLabelWithTildeOrGreaterThan() {
+        // The IC 1101 galaxy diagram: ~ and > are Mermaid tokens the lexer rejects
+        // inside an unquoted label. Quoting makes them literal.
+        let src = "graph TD\n D[Stars: ~100 trillion]\n E[Mass: >100 solar]"
+        XCTAssertEqual(MermaidSanitizer.repair(src),
+                       "graph TD\n D[\"Stars: ~100 trillion\"]\n E[\"Mass: >100 solar\"]")
+    }
+
+    func testStyleDirectiveWithHashNotMangled() {
+        // `style` lines carry # colour codes but aren't node labels — leave them alone.
+        let src = "graph TD\n A[X] --> B[Y]\n style A fill:#f9f,stroke:#333"
+        XCTAssertEqual(MermaidSanitizer.repair(src), src)
+    }
+
     func testLeadingDirectiveStillDetectsFlowchart() {
         let src = "%%{init: {'theme':'dark'}}%%\ngraph TD\n A[x (y)] --> B"
         XCTAssertEqual(MermaidSanitizer.repair(src),
