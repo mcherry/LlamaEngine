@@ -85,11 +85,16 @@ public enum WebSearch {
         /// Per-provider outcomes for a meta-search page (empty for single-provider searches),
         /// so the UI can flag engines that failed. See ``ProviderOutcome``.
         public let providerOutcomes: [ProviderOutcome]
-        public init(results: [Result], hasMore: Bool, nextOffset: Int, providerOutcomes: [ProviderOutcome] = []) {
+        /// The providers that actually made a network request this page (single-provider = the
+        /// one provider; meta = the engines it queried). Drives per-provider usage counting.
+        public let queriedProviders: [ProviderKind]
+        public init(results: [Result], hasMore: Bool, nextOffset: Int,
+                    providerOutcomes: [ProviderOutcome] = [], queriedProviders: [ProviderKind] = []) {
             self.results = results
             self.hasMore = hasMore
             self.nextOffset = nextOffset
             self.providerOutcomes = providerOutcomes
+            self.queriedProviders = queriedProviders
         }
     }
 
@@ -248,12 +253,13 @@ public enum WebSearch {
         if let meta = provider as? MetaSearchProvider {
             let run = await meta.run(trimmed, limit: limit)
             let state = paginationState(offset: offset, returned: run.results.count, requested: limit, caps: caps)
-            return SearchPage(results: run.results, hasMore: state.hasMore,
-                              nextOffset: state.nextOffset, providerOutcomes: run.outcomes)
+            return SearchPage(results: run.results, hasMore: state.hasMore, nextOffset: state.nextOffset,
+                              providerOutcomes: run.outcomes, queriedProviders: run.queried)
         }
         let results = try await provider.search(trimmed, limit: limit, offset: offset)
         let state = paginationState(offset: offset, returned: results.count, requested: limit, caps: caps)
-        return SearchPage(results: results, hasMore: state.hasMore, nextOffset: state.nextOffset)
+        return SearchPage(results: results, hasMore: state.hasMore, nextOffset: state.nextOffset,
+                          queriedProviders: [config.provider])
     }
 
     /// How many results to request for the page starting at `offset`, clamped so the running
@@ -807,7 +813,7 @@ struct MetaSearchProvider: WebSearchProvider {
     /// records each result into the shared gate, and returns the merged results plus a
     /// per-provider outcome (count / failure reason / cooldown), in provider order.
     func run(_ query: String, limit: Int) async
-        -> (results: [WebSearch.Result], outcomes: [WebSearch.ProviderOutcome]) {
+        -> (results: [WebSearch.Result], outcomes: [WebSearch.ProviderOutcome], queried: [WebSearch.ProviderKind]) {
         let now = Date()
         let kinds = providers.map(\.kind)
         let available = Set(await rateLimiter.availability(kinds, now: now).available)
@@ -844,7 +850,8 @@ struct MetaSearchProvider: WebSearchProvider {
             }
             return WebSearch.ProviderOutcome(provider: sub.kind, resultCount: 0, failureReason: nil)
         }
-        return (Array(merged.prefix(limit)), outcomes)
+        let queriedKinds = providers.map(\.kind).filter { queried[$0] != nil }
+        return (Array(merged.prefix(limit)), outcomes, queriedKinds)
     }
 
     /// Comprehensive: query every available provider in parallel, tagging each result (or

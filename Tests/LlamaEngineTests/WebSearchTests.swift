@@ -459,6 +459,26 @@ final class WebSearchTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(run.outcomes.first { $0.provider == .wikipedia }?.failureReason, .unavailable)
     }
+
+    func testSearchUsageRecordsAndCounts() {
+        let now = day(2026, 7, 15)
+        var json = SearchUsage.recording([.brave, .brave, .exa], into: "", now: now)
+        XCTAssertEqual(SearchUsage.count(.brave, in: json, now: now), 2)
+        XCTAssertEqual(SearchUsage.count(.exa, in: json, now: now), 1)
+        XCTAssertEqual(SearchUsage.count(.tavily, in: json, now: now), 0)
+        json = SearchUsage.recording([.brave], into: json, now: now)
+        XCTAssertEqual(SearchUsage.count(.brave, in: json, now: now), 3)
+    }
+
+    func testSearchUsageResetsOnNewMonth() {
+        let july = day(2026, 7, 31)
+        let august = day(2026, 8, 1)
+        let json = SearchUsage.recording([.brave], into: "", now: july)
+        XCTAssertEqual(SearchUsage.count(.brave, in: json, now: july), 1)
+        XCTAssertEqual(SearchUsage.count(.brave, in: json, now: august), 0)   // rolled over
+        let augustJSON = SearchUsage.recording([.brave], into: json, now: august)
+        XCTAssertEqual(SearchUsage.count(.brave, in: augustJSON, now: august), 1)
+    }
 }
 
 /// A canned provider for meta-search tests: returns fixed results, or throws `.http(failStatus)`.
@@ -492,4 +512,9 @@ private actor CallCountingStub: WebSearchProvider {
         return Array(results.prefix(limit))
     }
     func count() -> Int { calls }
+}
+
+/// Builds a local-calendar date for the deterministic usage tests.
+private func day(_ year: Int, _ month: Int, _ dayOfMonth: Int) -> Date {
+    Calendar.current.date(from: DateComponents(year: year, month: month, day: dayOfMonth))!
 }
