@@ -11,6 +11,9 @@ public struct WebSearchConfig: Sendable {
     public var linkupAPIKey: String
     public var tinyfishAPIKey: String
     public var marginaliaAPIKey: String
+    /// Providers included in meta-search's parallel fan-out (ignored by single-provider
+    /// searches). Defaults to every provider in the catalog.
+    public var enabledProviders: Set<WebSearch.ProviderKind>
 
     public init(provider: WebSearch.ProviderKind = .none,
                 searxngURL: String = "",
@@ -19,7 +22,8 @@ public struct WebSearchConfig: Sendable {
                 exaAPIKey: String = "",
                 linkupAPIKey: String = "",
                 tinyfishAPIKey: String = "",
-                marginaliaAPIKey: String = "public") {
+                marginaliaAPIKey: String = "public",
+                enabledProviders: Set<WebSearch.ProviderKind> = Set(WebSearch.catalog)) {
         self.provider = provider
         self.searxngURL = searxngURL
         self.braveAPIKey = braveAPIKey
@@ -28,6 +32,7 @@ public struct WebSearchConfig: Sendable {
         self.linkupAPIKey = linkupAPIKey
         self.tinyfishAPIKey = tinyfishAPIKey
         self.marginaliaAPIKey = marginaliaAPIKey
+        self.enabledProviders = enabledProviders
     }
 }
 
@@ -245,12 +250,19 @@ public enum WebSearch {
         case none, apiKey, instanceURL
     }
 
+    /// The providers meta-search will actually query, in catalog order: those the user has
+    /// enabled *and* that have their credential/URL ready. Drives both the fan-out and the
+    /// “meta will use these” hint in Settings.
+    public static func metaProviders(config: WebSearchConfig) -> [ProviderKind] {
+        catalog.filter { config.enabledProviders.contains($0) && isReady($0, config: config) }
+    }
+
     /// Builds the provider from an injected `WebSearchConfig`, or nil when
     /// none/unconfigured. The host app owns where the settings live. Meta-search fans out
-    /// over every other provider that’s ready in `config`.
+    /// over the enabled, ready providers (see ``metaProviders(config:)``).
     static func configuredProvider(_ config: WebSearchConfig) -> WebSearchProvider? {
         if config.provider == .meta {
-            let subProviders = catalog.compactMap { provider(for: $0, config: config) }
+            let subProviders = metaProviders(config: config).compactMap { provider(for: $0, config: config) }
             return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders)
         }
         return provider(for: config.provider, config: config)

@@ -288,6 +288,28 @@ final class WebSearchTests: XCTestCase {
         // Each engine returned its 4; the merged pool of 8 distinct URLs is capped to the limit.
         XCTAssertEqual(results.count, 4)
     }
+
+    func testMetaProvidersReflectEnabledAndReady() {
+        var config = WebSearchConfig() // all providers enabled by default
+        config.braveAPIKey = "k"
+        let providers = WebSearch.metaProviders(config: config)
+        XCTAssertTrue(providers.contains(.wikipedia))  // keyless, always ready
+        XCTAssertTrue(providers.contains(.marginalia)) // shared public key
+        XCTAssertTrue(providers.contains(.brave))      // now keyed
+        XCTAssertFalse(providers.contains(.exa))       // no key → not ready
+        XCTAssertEqual(providers, WebSearch.catalog.filter { providers.contains($0) }) // catalog order
+    }
+
+    func testMetaProvidersHonorEnabledSet() {
+        var config = WebSearchConfig(enabledProviders: [.wikipedia])
+        // Marginalia is ready but not enabled, so it's excluded.
+        XCTAssertEqual(WebSearch.metaProviders(config: config), [.wikipedia])
+        XCTAssertTrue(WebSearch.isReady(.meta, config: config))
+
+        config.enabledProviders = []
+        XCTAssertTrue(WebSearch.metaProviders(config: config).isEmpty)
+        XCTAssertFalse(WebSearch.isReady(.meta, config: config)) // no engines → meta not ready
+    }
 }
 
 /// A canned provider for meta-search tests: returns fixed results, or throws when `fails`.
