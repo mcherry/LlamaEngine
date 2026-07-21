@@ -81,7 +81,7 @@ public enum WebSearch {
     }
 
     public enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-        case none, wikipedia, searxng, marginalia, brave, tavily, exa, linkup, tinyfish
+        case none, wikipedia, searxng, marginalia, brave, tavily, exa, linkup, tinyfish, meta
         public var id: String { rawValue }
         public var label: String {
             switch self {
@@ -94,6 +94,7 @@ public enum WebSearch {
             case .exa: return "Exa"
             case .linkup: return "Linkup"
             case .tinyfish: return "TinyFish"
+            case .meta: return "Meta-search"
             }
         }
 
@@ -107,6 +108,9 @@ public enum WebSearch {
             case .exa:        return SearchCapabilities(pageSize: 20, maxResults: 20)
             case .linkup:     return SearchCapabilities(pageSize: 20, maxResults: 20)
             case .tinyfish:   return SearchCapabilities(pageSize: 20, maxResults: 20)
+            // Meta returns a single merged page (no pagination in v1); it asks each
+            // sub-provider for this many, then merges and keeps the top slice.
+            case .meta:       return SearchCapabilities(pageSize: 20, maxResults: 20)
             case .brave:      return SearchCapabilities(pageSize: 20, maxResults: 200)
             case .marginalia: return SearchCapabilities(pageSize: 20, maxResults: 100)
             case .wikipedia:  return SearchCapabilities(pageSize: 20, maxResults: nil)
@@ -117,7 +121,7 @@ public enum WebSearch {
         /// What credential the user must supply — drives the provider manager UI.
         public var credentialKind: WebSearch.CredentialKind {
             switch self {
-            case .none, .wikipedia: return .none
+            case .none, .wikipedia, .meta: return .none
             case .searxng: return .instanceURL
             case .marginalia, .brave, .tavily, .exa, .linkup, .tinyfish: return .apiKey
             }
@@ -135,6 +139,7 @@ public enum WebSearch {
             case .exa: return "Neural + keyword search built for AI, with free monthly credits."
             case .linkup: return "A production web-search API for AI, with free monthly credits."
             case .tinyfish: return "Browser-rendered live search — free, and uses no credits."
+            case .meta: return "Searches every engine you’ve set up at once, then merges and re-ranks the results so pages multiple engines agree on rise to the top."
             }
         }
 
@@ -146,7 +151,7 @@ public enum WebSearch {
             case .exa: return "https://dashboard.exa.ai/api-keys"
             case .linkup: return "https://app.linkup.so/"
             case .tinyfish: return "https://agent.tinyfish.ai/api-keys"
-            case .none, .wikipedia, .searxng, .marginalia: return nil
+            case .none, .wikipedia, .searxng, .marginalia, .meta: return nil
             }
         }
 
@@ -161,7 +166,7 @@ public enum WebSearch {
             case .exa: return "https://exa.ai/docs"
             case .linkup: return "https://docs.linkup.so/"
             case .tinyfish: return "https://docs.tinyfish.ai/search-api"
-            case .none: return nil
+            case .none, .meta: return nil
             }
         }
     }
@@ -230,8 +235,10 @@ public enum WebSearch {
         return isConfigured(probe)
     }
 
-    /// The user-selectable providers (everything except `.none`) for the provider manager.
-    public static let catalog: [ProviderKind] = ProviderKind.allCases.filter { $0 != .none }
+    /// The credential-bearing providers for the provider manager. Meta-search is a mode over
+    /// these (it has no credential of its own), so it's excluded — the manager configures the
+    /// individual engines meta fans out to.
+    public static let catalog: [ProviderKind] = ProviderKind.allCases.filter { $0 != .none && $0 != .meta }
 
     /// The kind of credential a provider needs — drives the provider manager’s field type.
     public enum CredentialKind: String, Sendable {
@@ -239,10 +246,21 @@ public enum WebSearch {
     }
 
     /// Builds the provider from an injected `WebSearchConfig`, or nil when
-    /// none/unconfigured. The host app owns where the settings live.
+    /// none/unconfigured. The host app owns where the settings live. Meta-search fans out
+    /// over every other provider that’s ready in `config`.
     static func configuredProvider(_ config: WebSearchConfig) -> WebSearchProvider? {
-        switch config.provider {
-        case .none:
+        if config.provider == .meta {
+            let subProviders = catalog.compactMap { provider(for: $0, config: config) }
+            return subProviders.isEmpty ? nil : MetaSearchProvider(providers: subProviders)
+        }
+        return provider(for: config.provider, config: config)
+    }
+
+    /// Builds a single (non-meta) provider from `config`, or nil when it lacks its
+    /// credential/URL. Meta-search composes these; see ``configuredProvider(_:)``.
+    private static func provider(for kind: ProviderKind, config: WebSearchConfig) -> WebSearchProvider? {
+        switch kind {
+        case .none, .meta:
             return nil
         case .wikipedia:
             return WikipediaProvider()
@@ -342,6 +360,68 @@ public enum WebSearch {
         return response.results.prefix(limit).map {
             Result(title: ($0.title ?? $0.url), url: $0.url, snippet: $0.snippet ?? "")
         }
+    }
+
+    // MARK: - Meta-search merge (pure)
+
+    /// Reciprocal Rank Fusion across several engines’ result lists. Dedups by canonical URL
+    /// and scores each URL `Σ 1/(k + rank)` (1-based rank within each engine that returned
+    /// it), so pages several engines agree on rise to the top — no score normalization or
+    /// tuning needed. Keeps the first-seen result for its title/snippet; ties break by
+    /// first-seen order so the ordering is stable. Pure, for testing.
+    static func mergeRRF(_ lists: [[Result]], k: Double = 60) -> [Result] {
+        var score: [String: Double] = [:]
+        var firstResult: [String: Result] = [:]
+        var order: [String] = []
+        for list in lists {
+            for (rank, result) in list.enumerated() {
+                let key = canonicalURL(result.url)
+                if firstResult[key] == nil {
+                    firstResult[key] = result
+                    order.append(key)
+                }
+                score[key, default: 0] += 1.0 / (k + Double(rank + 1))
+            }
+        }
+        let position = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
+        return order
+            .sorted { a, b in
+                let sa = score[a] ?? 0, sb = score[b] ?? 0
+                if sa != sb { return sa > sb }
+                return (position[a] ?? 0) < (position[b] ?? 0)
+            }
+            .compactMap { firstResult[$0] }
+    }
+
+    /// Canonicalizes a URL so the same page from different engines dedups together: lowercases
+    /// the host, drops any `www.`, ignores the scheme and fragment, strips common tracking
+    /// params (`utm_*`, `fbclid`, `gclid`, …), and trims a trailing slash. Pure, for testing.
+    static func canonicalURL(_ raw: String) -> String {
+        guard let components = URLComponents(string: raw), let host = components.host else {
+            return raw.lowercased()
+        }
+        var normalizedHost = host.lowercased()
+        if normalizedHost.hasPrefix("www.") { normalizedHost = String(normalizedHost.dropFirst(4)) }
+        var path = components.path
+        if path == "/" {
+            path = ""
+        } else if path.hasSuffix("/") {
+            path = String(path.dropLast())
+        }
+        let kept = (components.queryItems ?? [])
+            .filter { !isTrackingParam($0.name) }
+            .sorted { $0.name < $1.name }
+        let query = kept.isEmpty ? "" : "?" + kept.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+        return normalizedHost + path + query
+    }
+
+    /// Query parameters that identify a campaign/click rather than the page — dropped when
+    /// canonicalizing so tracked and untracked links to the same page dedup together.
+    static func isTrackingParam(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        if lowered.hasPrefix("utm_") { return true }
+        return ["fbclid", "gclid", "gbraid", "wbraid", "msclkid", "mc_cid", "mc_eid",
+                "igshid", "ref", "ref_src", "_hsenc", "_hsmi"].contains(lowered)
     }
 
     private struct SearXNGResponse: Decodable {
@@ -588,6 +668,31 @@ struct TinyFishProvider: WebSearchProvider {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let data = try await WebSearch.run(request)
         return try WebSearch.decodeTinyFish(data, limit: limit)
+    }
+}
+
+/// Meta-search — fans a query out across several sub-providers in parallel, then dedups by
+/// canonical URL and re-ranks with Reciprocal Rank Fusion so pages multiple engines return
+/// rise to the top. A sub-provider that errors (rate-limited, misconfigured, offline) simply
+/// contributes nothing — it never fails the whole search. Single page (no pagination in v1).
+struct MetaSearchProvider: WebSearchProvider {
+    let providers: [WebSearchProvider]
+
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
+        // Fan out concurrently, keeping each engine’s results indexed by its position so the
+        // merge is deterministic regardless of which request happens to finish first.
+        let byIndex = await withTaskGroup(of: (Int, [WebSearch.Result]).self) { group in
+            for (index, provider) in providers.enumerated() {
+                group.addTask {
+                    (index, (try? await provider.search(query, limit: limit, offset: 0)) ?? [])
+                }
+            }
+            var collected: [Int: [WebSearch.Result]] = [:]
+            for await (index, results) in group { collected[index] = results }
+            return collected
+        }
+        let lists = providers.indices.map { byIndex[$0] ?? [] }
+        return Array(WebSearch.mergeRRF(lists).prefix(limit))
     }
 }
 

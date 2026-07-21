@@ -144,6 +144,7 @@ final class WebSearchTests: XCTestCase {
         XCTAssertEqual(WebSearch.ProviderKind.exa.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
         XCTAssertEqual(WebSearch.ProviderKind.linkup.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
         XCTAssertEqual(WebSearch.ProviderKind.tinyfish.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
+        XCTAssertEqual(WebSearch.ProviderKind.meta.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
         XCTAssertEqual(WebSearch.ProviderKind.brave.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 200))
         XCTAssertEqual(WebSearch.ProviderKind.marginalia.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 100))
         XCTAssertNil(WebSearch.ProviderKind.wikipedia.searchCapabilities.maxResults)
@@ -187,9 +188,10 @@ final class WebSearchTests: XCTestCase {
 
     // MARK: - Provider catalog / readiness
 
-    func testCatalogExcludesNone() {
+    func testCatalogExcludesNoneAndMeta() {
         XCTAssertFalse(WebSearch.catalog.contains(.none))
-        XCTAssertEqual(WebSearch.catalog.count, WebSearch.ProviderKind.allCases.count - 1)
+        XCTAssertFalse(WebSearch.catalog.contains(.meta))
+        XCTAssertEqual(WebSearch.catalog.count, WebSearch.ProviderKind.allCases.count - 2)
     }
 
     func testEveryCatalogProviderHasSummary() {
@@ -222,5 +224,78 @@ final class WebSearchTests: XCTestCase {
         configured.searxngURL = "http://localhost:8080"
         XCTAssertTrue(WebSearch.isReady(.exa, config: configured))
         XCTAssertTrue(WebSearch.isReady(.searxng, config: configured))
+    }
+
+    // MARK: - Meta-search
+
+    func testMetaProviderMetadata() {
+        XCTAssertFalse(WebSearch.catalog.contains(.meta))
+        XCTAssertEqual(WebSearch.ProviderKind.meta.credentialKind, .none)
+        XCTAssertFalse(WebSearch.ProviderKind.meta.summary.isEmpty)
+        // Meta is always ready: it can always fall back to the keyless engines.
+        XCTAssertTrue(WebSearch.isReady(.meta, config: WebSearchConfig()))
+    }
+
+    func testCanonicalURLNormalizesForDedup() {
+        XCTAssertEqual(WebSearch.canonicalURL("https://www.Example.com/Path/"), "example.com/Path")
+        XCTAssertEqual(WebSearch.canonicalURL("http://example.com/Path"), "example.com/Path")
+        XCTAssertEqual(WebSearch.canonicalURL("https://example.com/p?utm_source=x&id=5#frag"), "example.com/p?id=5")
+        XCTAssertEqual(WebSearch.canonicalURL("https://example.com/"), "example.com")
+        XCTAssertEqual(WebSearch.canonicalURL("https://example.com"), "example.com")
+    }
+
+    func testMergeRRFBoostsConsensusAndDedups() {
+        let listA = [
+            WebSearch.Result(title: "Shared", url: "https://shared.com/x", snippet: ""),
+            WebSearch.Result(title: "OnlyA", url: "https://a.com", snippet: "")
+        ]
+        let listB = [
+            WebSearch.Result(title: "OnlyB", url: "https://b.com", snippet: ""),
+            WebSearch.Result(title: "SharedDup", url: "https://www.shared.com/x/", snippet: "")
+        ]
+        let merged = WebSearch.mergeRRF([listA, listB])
+        // The consensus page dedups to one entry (canonical URL) and ranks first.
+        XCTAssertEqual(merged.count, 3)
+        XCTAssertEqual(merged.first?.url, "https://shared.com/x")
+        XCTAssertEqual(merged.first?.title, "Shared") // first-seen result is kept
+    }
+
+    func testMetaSearchFansOutMergesAndIsolatesFailures() async throws {
+        let a = StubProvider(results: [
+            WebSearch.Result(title: "Shared", url: "https://shared.com", snippet: "a"),
+            WebSearch.Result(title: "OnlyA", url: "https://a.com", snippet: "a")
+        ])
+        let b = StubProvider(results: [
+            WebSearch.Result(title: "Shared", url: "https://shared.com", snippet: "b"),
+            WebSearch.Result(title: "OnlyB", url: "https://b.com", snippet: "b")
+        ])
+        let failing = StubProvider(results: [], fails: true)
+        let meta = MetaSearchProvider(providers: [a, b, failing])
+        let results = try await meta.search("q", limit: 10, offset: 0)
+        // Shared (two engines) ranks first; the failing provider is isolated and contributes nothing.
+        XCTAssertEqual(results.map { $0.url }, ["https://shared.com", "https://a.com", "https://b.com"])
+    }
+
+    func testMetaSearchCapsMergedResultsToLimit() async throws {
+        let a = StubProvider(results: (0..<5).map {
+            WebSearch.Result(title: "A\($0)", url: "https://a.com/\($0)", snippet: "")
+        })
+        let b = StubProvider(results: (0..<5).map {
+            WebSearch.Result(title: "B\($0)", url: "https://b.com/\($0)", snippet: "")
+        })
+        let meta = MetaSearchProvider(providers: [a, b])
+        let results = try await meta.search("q", limit: 4, offset: 0)
+        // Each engine returned its 4; the merged pool of 8 distinct URLs is capped to the limit.
+        XCTAssertEqual(results.count, 4)
+    }
+}
+
+/// A canned provider for meta-search tests: returns fixed results, or throws when `fails`.
+private struct StubProvider: WebSearchProvider {
+    let results: [WebSearch.Result]
+    var fails = false
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
+        if fails { throw WebSearch.SearchError.http(429) }
+        return Array(results.prefix(limit))
     }
 }
