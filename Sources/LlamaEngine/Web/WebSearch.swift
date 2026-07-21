@@ -113,6 +113,57 @@ public enum WebSearch {
             case .searxng:    return SearchCapabilities(pageSize: 20, maxResults: nil)
             }
         }
+
+        /// What credential the user must supply — drives the provider manager UI.
+        public var credentialKind: WebSearch.CredentialKind {
+            switch self {
+            case .none, .wikipedia: return .none
+            case .searxng: return .instanceURL
+            case .marginalia, .brave, .tavily, .exa, .linkup, .tinyfish: return .apiKey
+            }
+        }
+
+        /// A one-line description shown in the provider manager.
+        public var summary: String {
+            switch self {
+            case .none: return ""
+            case .wikipedia: return "English Wikipedia — great for history, places, and general facts. No account needed."
+            case .searxng: return "A self-hosted SearXNG instance that aggregates real engines. No account needed."
+            case .marginalia: return "An independent engine for text-heavy, non-commercial pages. Works out of the box with the shared “public” key."
+            case .brave: return "Brave’s own independent search index, with a generous free tier."
+            case .tavily: return "An LLM-focused search API with a free tier."
+            case .exa: return "Neural + keyword search built for AI, with free monthly credits."
+            case .linkup: return "A production web-search API for AI, with free monthly credits."
+            case .tinyfish: return "Browser-rendered live search — free, and uses no credits."
+            }
+        }
+
+        /// Where to get an API key (nil for keyless providers or ones without self-serve signup).
+        public var signupURL: String? {
+            switch self {
+            case .brave: return "https://api-dashboard.search.brave.com/"
+            case .tavily: return "https://app.tavily.com/"
+            case .exa: return "https://dashboard.exa.ai/api-keys"
+            case .linkup: return "https://app.linkup.so/"
+            case .tinyfish: return "https://agent.tinyfish.ai/api-keys"
+            case .none, .wikipedia, .searxng, .marginalia: return nil
+            }
+        }
+
+        /// The provider’s API documentation.
+        public var docsURL: String? {
+            switch self {
+            case .wikipedia: return "https://www.mediawiki.org/wiki/API:Search"
+            case .searxng: return "https://docs.searxng.org/"
+            case .marginalia: return "https://about.marginalia-search.com/article/api/"
+            case .brave: return "https://api-dashboard.search.brave.com/app/documentation"
+            case .tavily: return "https://docs.tavily.com/"
+            case .exa: return "https://exa.ai/docs"
+            case .linkup: return "https://docs.linkup.so/"
+            case .tinyfish: return "https://docs.tinyfish.ai/search-api"
+            case .none: return nil
+            }
+        }
     }
 
     public enum SearchError: LocalizedError {
@@ -169,6 +220,22 @@ public enum WebSearch {
     /// Whether the given configuration yields a usable search provider.
     public static func isConfigured(_ config: WebSearchConfig) -> Bool {
         configuredProvider(config) != nil
+    }
+
+    /// Whether `provider` has the credential/URL it needs in `config` to run a search.
+    /// Ignores `config.provider`, so the provider manager can show per-row readiness.
+    public static func isReady(_ provider: ProviderKind, config: WebSearchConfig) -> Bool {
+        var probe = config
+        probe.provider = provider
+        return isConfigured(probe)
+    }
+
+    /// The user-selectable providers (everything except `.none`) for the provider manager.
+    public static let catalog: [ProviderKind] = ProviderKind.allCases.filter { $0 != .none }
+
+    /// The kind of credential a provider needs — drives the provider manager’s field type.
+    public enum CredentialKind: String, Sendable {
+        case none, apiKey, instanceURL
     }
 
     /// Builds the provider from an injected `WebSearchConfig`, or nil when

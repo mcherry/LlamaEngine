@@ -184,4 +184,43 @@ final class WebSearchTests: XCTestCase {
         let sliced = try WebSearch.decodeTavily(Data(json.utf8), limit: 2, offset: 1)
         XCTAssertEqual(sliced.map(\.url), ["https://b.com", "https://c.com"])
     }
+
+    // MARK: - Provider catalog / readiness
+
+    func testCatalogExcludesNone() {
+        XCTAssertFalse(WebSearch.catalog.contains(.none))
+        XCTAssertEqual(WebSearch.catalog.count, WebSearch.ProviderKind.allCases.count - 1)
+    }
+
+    func testEveryCatalogProviderHasSummary() {
+        for provider in WebSearch.catalog {
+            XCTAssertFalse(provider.summary.isEmpty, "\(provider) is missing a summary")
+        }
+    }
+
+    func testKeyedProvidersHaveSignupURL() {
+        for provider in WebSearch.catalog where provider.credentialKind == .apiKey && provider != .marginalia {
+            XCTAssertNotNil(provider.signupURL, "\(provider) is missing a signup URL")
+        }
+    }
+
+    func testCredentialKinds() {
+        XCTAssertEqual(WebSearch.ProviderKind.wikipedia.credentialKind, .none)
+        XCTAssertEqual(WebSearch.ProviderKind.searxng.credentialKind, .instanceURL)
+        XCTAssertEqual(WebSearch.ProviderKind.exa.credentialKind, .apiKey)
+    }
+
+    func testIsReadyReflectsCredentials() {
+        let empty = WebSearchConfig()
+        XCTAssertTrue(WebSearch.isReady(.wikipedia, config: empty))  // keyless
+        XCTAssertTrue(WebSearch.isReady(.marginalia, config: empty)) // default "public" key
+        XCTAssertFalse(WebSearch.isReady(.exa, config: empty))
+        XCTAssertFalse(WebSearch.isReady(.searxng, config: empty))
+
+        var configured = empty
+        configured.exaAPIKey = "k"
+        configured.searxngURL = "http://localhost:8080"
+        XCTAssertTrue(WebSearch.isReady(.exa, config: configured))
+        XCTAssertTrue(WebSearch.isReady(.searxng, config: configured))
+    }
 }
