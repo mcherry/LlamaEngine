@@ -103,11 +103,47 @@ final class WebSearchTests: XCTestCase {
         XCTAssertEqual(results.first?.snippet, "")
     }
 
+    func testDecodeLinkup() throws {
+        let json = #"{"results":[{"name":"A","url":"https://a.com","content":"snip a","type":"text"}]}"#
+        let results = try WebSearch.decodeLinkup(Data(json.utf8), limit: 5)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results[0].title, "A")
+        XCTAssertEqual(results[0].url, "https://a.com")
+        XCTAssertEqual(results[0].snippet, "snip a")
+    }
+
+    func testDecodeLinkupTitleFallsBackToURLAndRespectsLimit() throws {
+        let json = #"{"results":[{"url":"https://a.com"},{"url":"https://b.com"}]}"#
+        let results = try WebSearch.decodeLinkup(Data(json.utf8), limit: 1)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.title, "https://a.com")
+        XCTAssertEqual(results.first?.snippet, "")
+    }
+
+    func testDecodeTinyFish() throws {
+        let json = #"{"query":"q","results":[{"position":1,"site_name":"a.com","title":"A","snippet":"snip a","url":"https://a.com"}],"total_results":10,"page":0}"#
+        let results = try WebSearch.decodeTinyFish(Data(json.utf8), limit: 5)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results[0].title, "A")
+        XCTAssertEqual(results[0].url, "https://a.com")
+        XCTAssertEqual(results[0].snippet, "snip a")
+    }
+
+    func testDecodeTinyFishTitleFallsBackToURLAndRespectsLimit() throws {
+        let json = #"{"results":[{"url":"https://a.com"},{"url":"https://b.com"}]}"#
+        let results = try WebSearch.decodeTinyFish(Data(json.utf8), limit: 1)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.title, "https://a.com")
+        XCTAssertEqual(results.first?.snippet, "")
+    }
+
     // MARK: - Pagination
 
     func testProviderCapabilities() {
         XCTAssertEqual(WebSearch.ProviderKind.tavily.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
         XCTAssertEqual(WebSearch.ProviderKind.exa.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
+        XCTAssertEqual(WebSearch.ProviderKind.linkup.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
+        XCTAssertEqual(WebSearch.ProviderKind.tinyfish.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
         XCTAssertEqual(WebSearch.ProviderKind.brave.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 200))
         XCTAssertEqual(WebSearch.ProviderKind.marginalia.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 100))
         XCTAssertNil(WebSearch.ProviderKind.wikipedia.searchCapabilities.maxResults)

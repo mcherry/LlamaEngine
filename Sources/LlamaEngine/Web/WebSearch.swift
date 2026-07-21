@@ -8,6 +8,8 @@ public struct WebSearchConfig: Sendable {
     public var braveAPIKey: String
     public var tavilyAPIKey: String
     public var exaAPIKey: String
+    public var linkupAPIKey: String
+    public var tinyfishAPIKey: String
     public var marginaliaAPIKey: String
 
     public init(provider: WebSearch.ProviderKind = .none,
@@ -15,12 +17,16 @@ public struct WebSearchConfig: Sendable {
                 braveAPIKey: String = "",
                 tavilyAPIKey: String = "",
                 exaAPIKey: String = "",
+                linkupAPIKey: String = "",
+                tinyfishAPIKey: String = "",
                 marginaliaAPIKey: String = "public") {
         self.provider = provider
         self.searxngURL = searxngURL
         self.braveAPIKey = braveAPIKey
         self.tavilyAPIKey = tavilyAPIKey
         self.exaAPIKey = exaAPIKey
+        self.linkupAPIKey = linkupAPIKey
+        self.tinyfishAPIKey = tinyfishAPIKey
         self.marginaliaAPIKey = marginaliaAPIKey
     }
 }
@@ -75,7 +81,7 @@ public enum WebSearch {
     }
 
     public enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-        case none, wikipedia, searxng, marginalia, brave, tavily, exa
+        case none, wikipedia, searxng, marginalia, brave, tavily, exa, linkup, tinyfish
         public var id: String { rawValue }
         public var label: String {
             switch self {
@@ -86,6 +92,8 @@ public enum WebSearch {
             case .brave: return "Brave"
             case .tavily: return "Tavily"
             case .exa: return "Exa"
+            case .linkup: return "Linkup"
+            case .tinyfish: return "TinyFish"
             }
         }
 
@@ -97,6 +105,8 @@ public enum WebSearch {
             case .none:       return SearchCapabilities(pageSize: 20, maxResults: 0)
             case .tavily:     return SearchCapabilities(pageSize: 20, maxResults: 20)
             case .exa:        return SearchCapabilities(pageSize: 20, maxResults: 20)
+            case .linkup:     return SearchCapabilities(pageSize: 20, maxResults: 20)
+            case .tinyfish:   return SearchCapabilities(pageSize: 20, maxResults: 20)
             case .brave:      return SearchCapabilities(pageSize: 20, maxResults: 200)
             case .marginalia: return SearchCapabilities(pageSize: 20, maxResults: 100)
             case .wikipedia:  return SearchCapabilities(pageSize: 20, maxResults: nil)
@@ -185,6 +195,12 @@ public enum WebSearch {
         case .exa:
             let key = config.exaAPIKey.trimmingCharacters(in: .whitespaces)
             return key.isEmpty ? nil : ExaProvider(apiKey: key)
+        case .linkup:
+            let key = config.linkupAPIKey.trimmingCharacters(in: .whitespaces)
+            return key.isEmpty ? nil : LinkupProvider(apiKey: key)
+        case .tinyfish:
+            let key = config.tinyfishAPIKey.trimmingCharacters(in: .whitespaces)
+            return key.isEmpty ? nil : TinyFishProvider(apiKey: key)
         }
     }
 
@@ -247,6 +263,20 @@ public enum WebSearch {
         }
     }
 
+    static func decodeLinkup(_ data: Data, limit: Int) throws -> [Result] {
+        let response = try JSONDecoder().decode(LinkupResponse.self, from: data)
+        return response.results.prefix(limit).map {
+            Result(title: ($0.name ?? $0.url), url: $0.url, snippet: $0.content ?? "")
+        }
+    }
+
+    static func decodeTinyFish(_ data: Data, limit: Int) throws -> [Result] {
+        let response = try JSONDecoder().decode(TinyFishResponse.self, from: data)
+        return response.results.prefix(limit).map {
+            Result(title: ($0.title ?? $0.url), url: $0.url, snippet: $0.snippet ?? "")
+        }
+    }
+
     private struct SearXNGResponse: Decodable {
         let results: [Item]
         struct Item: Decodable { let url: String; let title: String?; let content: String? }
@@ -283,6 +313,16 @@ public enum WebSearch {
             let summary: String?
             let highlights: [String]?
         }
+    }
+
+    private struct LinkupResponse: Decodable {
+        let results: [Item]
+        struct Item: Decodable { let name: String?; let url: String; let content: String? }
+    }
+
+    private struct TinyFishResponse: Decodable {
+        let results: [Item]
+        struct Item: Decodable { let title: String?; let url: String; let snippet: String? }
     }
 }
 
@@ -435,6 +475,52 @@ struct ExaProvider: WebSearchProvider {
         ])
         let data = try await WebSearch.run(request)
         return try WebSearch.decodeExa(data, limit: limit)
+    }
+}
+
+/// Linkup — a production web-search API for AI (POST JSON, Bearer auth). Uses the
+/// `searchResults` output so results carry URLs + snippets. Single page (no offset).
+struct LinkupProvider: WebSearchProvider {
+    let apiKey: String
+
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
+        guard let url = URL(string: "https://api.linkup.so/v1/search") else {
+            throw WebSearch.SearchError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "q": query,
+            "depth": "standard",
+            "outputType": "searchResults",
+            "maxResults": limit
+        ])
+        let data = try await WebSearch.run(request)
+        return try WebSearch.decodeLinkup(data, limit: limit)
+    }
+}
+
+/// TinyFish — a browser-rendered search API (GET, `X-API-Key` header). Search is free and
+/// uses no credits. Single page here (its `page` param is left at the default).
+struct TinyFishProvider: WebSearchProvider {
+    let apiKey: String
+
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
+        guard var components = URLComponents(string: "https://api.search.tinyfish.ai") else {
+            throw WebSearch.SearchError.notConfigured
+        }
+        components.queryItems = [URLQueryItem(name: "query", value: query)]
+        guard let url = components.url else { throw WebSearch.SearchError.notConfigured }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let data = try await WebSearch.run(request)
+        return try WebSearch.decodeTinyFish(data, limit: limit)
     }
 }
 
