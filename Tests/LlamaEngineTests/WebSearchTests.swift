@@ -78,10 +78,36 @@ final class WebSearchTests: XCTestCase {
         XCTAssertEqual(try WebSearch.decodeMarginalia(Data(json.utf8), limit: 1).count, 1)
     }
 
+    func testDecodeExaUsesHighlightAsSnippet() throws {
+        let json = #"{"requestId":"x","results":[{"title":"A","url":"https://a.com","highlights":["snip a","more"],"summary":"sum a","text":"full text a"}]}"#
+        let results = try WebSearch.decodeExa(Data(json.utf8), limit: 5)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results[0].title, "A")
+        XCTAssertEqual(results[0].url, "https://a.com")
+        XCTAssertEqual(results[0].snippet, "snip a")
+    }
+
+    func testDecodeExaFallsBackSummaryThenText() throws {
+        let summaryOnly = #"{"results":[{"title":"A","url":"https://a.com","summary":"sum a"}]}"#
+        XCTAssertEqual(try WebSearch.decodeExa(Data(summaryOnly.utf8), limit: 5).first?.snippet, "sum a")
+
+        let textOnly = #"{"results":[{"title":"A","url":"https://a.com","text":"full text a"}]}"#
+        XCTAssertEqual(try WebSearch.decodeExa(Data(textOnly.utf8), limit: 5).first?.snippet, "full text a")
+    }
+
+    func testDecodeExaTitleFallsBackToURLAndRespectsLimit() throws {
+        let json = #"{"results":[{"url":"https://a.com"},{"url":"https://b.com"}]}"#
+        let results = try WebSearch.decodeExa(Data(json.utf8), limit: 1)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.title, "https://a.com")
+        XCTAssertEqual(results.first?.snippet, "")
+    }
+
     // MARK: - Pagination
 
     func testProviderCapabilities() {
         XCTAssertEqual(WebSearch.ProviderKind.tavily.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
+        XCTAssertEqual(WebSearch.ProviderKind.exa.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 20))
         XCTAssertEqual(WebSearch.ProviderKind.brave.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 200))
         XCTAssertEqual(WebSearch.ProviderKind.marginalia.searchCapabilities, SearchCapabilities(pageSize: 20, maxResults: 100))
         XCTAssertNil(WebSearch.ProviderKind.wikipedia.searchCapabilities.maxResults)

@@ -7,17 +7,20 @@ public struct WebSearchConfig: Sendable {
     public var searxngURL: String
     public var braveAPIKey: String
     public var tavilyAPIKey: String
+    public var exaAPIKey: String
     public var marginaliaAPIKey: String
 
     public init(provider: WebSearch.ProviderKind = .none,
                 searxngURL: String = "",
                 braveAPIKey: String = "",
                 tavilyAPIKey: String = "",
+                exaAPIKey: String = "",
                 marginaliaAPIKey: String = "public") {
         self.provider = provider
         self.searxngURL = searxngURL
         self.braveAPIKey = braveAPIKey
         self.tavilyAPIKey = tavilyAPIKey
+        self.exaAPIKey = exaAPIKey
         self.marginaliaAPIKey = marginaliaAPIKey
     }
 }
@@ -72,7 +75,7 @@ public enum WebSearch {
     }
 
     public enum ProviderKind: String, CaseIterable, Identifiable, Sendable {
-        case none, wikipedia, searxng, marginalia, brave, tavily
+        case none, wikipedia, searxng, marginalia, brave, tavily, exa
         public var id: String { rawValue }
         public var label: String {
             switch self {
@@ -82,6 +85,7 @@ public enum WebSearch {
             case .marginalia: return "Marginalia"
             case .brave: return "Brave"
             case .tavily: return "Tavily"
+            case .exa: return "Exa"
             }
         }
 
@@ -92,6 +96,7 @@ public enum WebSearch {
             switch self {
             case .none:       return SearchCapabilities(pageSize: 20, maxResults: 0)
             case .tavily:     return SearchCapabilities(pageSize: 20, maxResults: 20)
+            case .exa:        return SearchCapabilities(pageSize: 20, maxResults: 20)
             case .brave:      return SearchCapabilities(pageSize: 20, maxResults: 200)
             case .marginalia: return SearchCapabilities(pageSize: 20, maxResults: 100)
             case .wikipedia:  return SearchCapabilities(pageSize: 20, maxResults: nil)
@@ -177,6 +182,9 @@ public enum WebSearch {
         case .tavily:
             let key = config.tavilyAPIKey.trimmingCharacters(in: .whitespaces)
             return key.isEmpty ? nil : TavilyProvider(apiKey: key)
+        case .exa:
+            let key = config.exaAPIKey.trimmingCharacters(in: .whitespaces)
+            return key.isEmpty ? nil : ExaProvider(apiKey: key)
         }
     }
 
@@ -226,6 +234,19 @@ public enum WebSearch {
         }
     }
 
+    static func decodeExa(_ data: Data, limit: Int) throws -> [Result] {
+        let response = try JSONDecoder().decode(ExaResponse.self, from: data)
+        return response.results.prefix(limit).map { item in
+            // Prefer a highlight (requested via `contents.highlights`), then a summary, then a
+            // trimmed slice of the page text — whichever the response actually carries.
+            let snippet = item.highlights?.first(where: { !$0.isEmpty })
+                ?? item.summary
+                ?? item.text.map { String($0.prefix(400)) }
+                ?? ""
+            return Result(title: (item.title ?? item.url), url: item.url, snippet: snippet)
+        }
+    }
+
     private struct SearXNGResponse: Decodable {
         let results: [Item]
         struct Item: Decodable { let url: String; let title: String?; let content: String? }
@@ -251,6 +272,17 @@ public enum WebSearch {
     private struct MarginaliaResponse: Decodable {
         let results: [Item]
         struct Item: Decodable { let url: String; let title: String?; let description: String? }
+    }
+
+    private struct ExaResponse: Decodable {
+        let results: [Item]
+        struct Item: Decodable {
+            let title: String?
+            let url: String
+            let text: String?
+            let summary: String?
+            let highlights: [String]?
+        }
     }
 }
 
@@ -377,6 +409,32 @@ struct MarginaliaProvider: WebSearchProvider {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let data = try await WebSearch.run(request)
         return try WebSearch.decodeMarginalia(data, limit: limit)
+    }
+}
+
+/// Exa — a search API built for AIs (neural + keyword), POST JSON with an `x-api-key`
+/// header. Requests highlights so each result carries a usable snippet. Its capabilities cap
+/// results to a single fetch (like Tavily), so `offset` is always 0 and unused here.
+struct ExaProvider: WebSearchProvider {
+    let apiKey: String
+
+    func search(_ query: String, limit: Int, offset: Int) async throws -> [WebSearch.Result] {
+        guard let url = URL(string: "https://api.exa.ai/search") else {
+            throw WebSearch.SearchError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "query": query,
+            "numResults": limit,
+            "contents": ["highlights": true]
+        ])
+        let data = try await WebSearch.run(request)
+        return try WebSearch.decodeExa(data, limit: limit)
     }
 }
 
