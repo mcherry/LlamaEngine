@@ -33,7 +33,10 @@ handles all things AI.
 - **Speech** — text‑to‑speech (Apple on‑device or a Kokoro server) and dictation
   (speech‑to‑text) with live narration.
 - **Web** — fetch, `robots.txt` compliance, readable HTML extraction, and multi‑provider
-  search (SearXNG, Brave, Tavily, Marginalia, Wikipedia).
+  search (Wikipedia, SearXNG, Marginalia, Brave, Tavily, Exa, Linkup, TinyFish), plus an
+  optional **meta-search** that fans out across providers, de-dupes by URL, and re-ranks by
+  consensus (Reciprocal Rank Fusion) — including per-provider rate-limit cooldowns
+  (honouring `Retry-After`), typed failure reporting, and monthly usage counting.
 - **Rendering logic** — Markdown parsing, Mermaid sanitizing, and syntax highlighting
   (pure logic; you supply the views).
 - **Batteries‑included persistence** — a SwiftData store (`ChatSession`, `ChatMessage`,
@@ -151,7 +154,7 @@ LlamaEngine  (core — headless, no SwiftUI/SwiftData)
 ├── Services/  ContextAssembler (RAG), VisionExtractor, TitleGenerator, SessionExporter, ServerProbe
 ├── Media/     Image generation, TTS + dictation, image/voice option enums
 ├── Text/      Markdown / Mermaid / syntax-highlight parsing (logic only, no views)
-└── Web/        Fetch, robots.txt, HTML extraction, multi-provider search
+└── Web/        Fetch, robots.txt, HTML extraction, multi-provider + meta search (RRF, rate-limit cooldowns)
 
 LlamaEngineStore  (SwiftData — depends on core)
 ├── Models/                  @Model ChatSession, ChatMessage, Attachment, DocumentChunk, PromptPreset, SessionConfig
@@ -176,7 +179,8 @@ The host passes configuration into calls — the engine reads no `UserDefaults` 
 - **Media:** `ImageProvider`, `ImageRequest`, `ImageSampler` / `ImageUpscaler` /
   `FaceCorrection`, `ImageBackendKind`, `TTSProvider`, `SpeechController`,
   `DictationController`, `TTSEngine`
-- **Web:** `WebAccess`, `WebSearch` (+ `WebSearchConfig`), `HTMLExtractor`, `RobotsTxt`
+- **Web:** `WebAccess`, `WebSearch` (+ `WebSearchConfig`, `MetaSearchMode`, `ProviderOutcome`),
+  `RateLimitGate`, `SearchUsage`, `HTMLExtractor`, `RobotsTxt`
 - **Store:** `ConversationController`, `ChatSession`, `ChatMessage`, `Attachment`,
   `DocumentChunk`, `PromptPreset`, `AttachmentLoader`
 
@@ -205,7 +209,7 @@ swift test
 ```
 
 The suite is hermetic (no network or running server required): decoders, stream parsers,
-token budgeting, calibration, retrieval, and controller guard paths are all unit‑tested.
+token budgeting, calibration, retrieval, meta-search ranking, and controller guard paths are all unit‑tested.
 
 ## License
 

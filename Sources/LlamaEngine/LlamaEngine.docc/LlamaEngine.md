@@ -121,6 +121,8 @@ For batteries‑included persistence — SwiftData models plus a persisting cont
 - ``WebAccess``
 - ``WebSearch``
 - ``WebSearchConfig``
+- ``RateLimitGate``
+- ``SearchUsage``
 - ``HTMLExtractor``
 - ``RobotsTxt``
 
