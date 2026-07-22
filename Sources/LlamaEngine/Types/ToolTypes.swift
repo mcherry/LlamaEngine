@@ -56,6 +56,14 @@ public extension JSONValue {
         if case let .object(dict) = self, case let .string(value)? = dict[key] { return value }
         return nil
     }
+
+    /// A compact JSON string of this value, with verbatim keys ("{}" on failure). Used to
+    /// serialize tool-call arguments for the wire and for the audit record.
+    var jsonString: String {
+        guard let data = try? JSONEncoder().encode(self),
+              let string = String(data: data, encoding: .utf8) else { return "{}" }
+        return string
+    }
 }
 
 /// A JSON-Schema fragment describing a tool's parameters, sent to the model. A thin

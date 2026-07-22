@@ -16,5 +16,6 @@ public enum LlamaEngineStore {
         Attachment.self,
         DocumentChunk.self,
         PromptPreset.self,
+        ToolCallRecord.self,
     ]
 }

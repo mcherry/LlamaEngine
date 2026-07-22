@@ -232,7 +232,7 @@ public struct LlamaServerClient: Sendable, ServerBackend {
                 toolCalls: turn.toolCalls.isEmpty ? nil : turn.toolCalls.map {
                     ChatBody.Message.ToolCallWire(
                         id: $0.id,
-                        function: .init(name: $0.name, arguments: Self.encodeArguments($0.arguments)))
+                        function: .init(name: $0.name, arguments: $0.arguments.jsonString))
                 },
                 toolCallId: turn.toolCallID)
         }
@@ -257,14 +257,6 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         return try encoder.encode(body)
-    }
-
-    /// Serializes tool-call arguments to a compact JSON string (the OpenAI wire form) with
-    /// verbatim keys — no snake_case strategy. Falls back to "{}" on failure.
-    static func encodeArguments(_ value: JSONValue) -> String {
-        guard let data = try? JSONEncoder().encode(value),
-              let string = String(data: data, encoding: .utf8) else { return "{}" }
-        return string
     }
 
     /// One parsed Server-Sent Events line. A plain `Sendable`/`Equatable` value so the

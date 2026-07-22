@@ -53,6 +53,7 @@ public final class ConversationController {
               imageServerURL: String = "",
               imageBackendKind: String = ImageBackendKind.easyDiffusion.rawValue,
               imageWorkflowTemplate: ComfyWorkflowTemplate? = nil,
+              toolRegistry: ToolRegistry? = nil,
               modelContext: ModelContext) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, session.isConfigured else { return }
@@ -167,23 +168,42 @@ public final class ConversationController {
             // minute window; zero omits the field (server default).
             let keepAlive: String? = keepAliveMinutes < 0 ? "-1"
                 : (keepAliveMinutes > 0 ? "\(keepAliveMinutes)m" : nil)
-            let request = ChatRequest(model: session.modelName,
+            var request = ChatRequest(model: session.modelName,
                                       messages: turns,
                                       contextSize: stableCtx,
                                       numPredict: session.maxResponseTokens,
                                       think: session.reasoningMode.think,
                                       keepAlive: keepAlive,
                                       parameters: session.generationParameters)
+            // Tools are only wired for the streaming server backends (Apple FM tool calling
+            // is a later phase). With a non-empty registry, advertise the specs and run the
+            // bounded agent loop; otherwise the single-pass path below is unchanged.
+            let toolsEnabled = (session.backend == .ollama || session.backend == .llamaServer)
+                && (toolRegistry.map { !$0.specs.isEmpty } ?? false)
+            if toolsEnabled, let registry = toolRegistry {
+                request.tools = registry.specs
+            }
             assistant.requestPayload = RequestInspector.payload(for: request,
                                                                 backend: session.backend,
                                                                 appleOptions: session.appleOptions)
             self.activityStatus = "Waiting for the model…"
-            await self.consume(backend.chat(request),
-                               into: assistant,
-                               session: session,
-                               titleBackend: backend,
-                               rawPromptEstimate: rawPromptTokens,
-                               modelContext: modelContext)
+            if toolsEnabled, let registry = toolRegistry {
+                await self.runToolLoop(backend: backend,
+                                       baseRequest: request,
+                                       baseTurns: turns,
+                                       registry: registry,
+                                       into: assistant,
+                                       session: session,
+                                       rawPromptEstimate: rawPromptTokens,
+                                       modelContext: modelContext)
+            } else {
+                await self.consume(backend.chat(request),
+                                   into: assistant,
+                                   session: session,
+                                   titleBackend: backend,
+                                   rawPromptEstimate: rawPromptTokens,
+                                   modelContext: modelContext)
+            }
         }
     }
 
@@ -392,6 +412,127 @@ public final class ConversationController {
             }
             errorMessage = error.localizedDescription
         }
+    }
+
+    // MARK: - Agent loop (tools)
+
+    private struct RoundOutcome {
+        var toolCallDeltas: [ToolCallDelta] = []
+        var doneReason: String?
+        var promptTokens: Int?
+        var evalTokens: Int?
+        var evalDurationNanos: Int?
+        var roundContent: String = ""
+    }
+
+    /// The bounded tool-calling loop: stream a round, and if the model proposed tool calls,
+    /// run them locally, feed the results back as `role:"tool"` turns, and stream again —
+    /// up to `registry.maxIterations` rounds, then one final round with tools withdrawn so
+    /// the model must answer. Content/reasoning stream into `assistant`; each call is
+    /// audited as a `ToolCallRecord`. Only the streaming server backends reach here.
+    func runToolLoop(backend: ChatStreaming,
+                     baseRequest: ChatRequest,
+                     baseTurns: [ChatTurn],
+                     registry: ToolRegistry,
+                     into assistant: ChatMessage,
+                     session: ChatSession,
+                     rawPromptEstimate: Int,
+                     modelContext: ModelContext) async {
+        let started = Date()
+        var toolTurns: [ChatTurn] = []
+        var round = 0
+        defer { activityStatus = nil }
+        do {
+            while true {
+                try Task.checkCancellation()
+                let allowTools = round < registry.maxIterations
+                var request = baseRequest
+                request.messages = baseTurns + toolTurns
+                request.tools = allowTools ? registry.specs : []
+
+                let outcome = try await streamRound(backend.chat(request),
+                                                    into: assistant,
+                                                    firstRound: round == 0,
+                                                    startedAt: started)
+
+                assistant.promptTokens = outcome.promptTokens
+                assistant.evalTokens = outcome.evalTokens
+                assistant.evalDurationNanos = outcome.evalDurationNanos
+                assistant.wasTruncated = (outcome.doneReason == "length")
+                // Calibrate on the first round only — its prompt matches the estimate.
+                if round == 0, session.backend == .ollama || session.backend == .llamaServer,
+                   let actual = outcome.promptTokens {
+                    tokenCalibrator.record(model: session.modelName,
+                                           rawEstimate: rawPromptEstimate, actualTokens: actual)
+                }
+
+                let calls = ToolCallAssembler.assemble(outcome.toolCallDeltas)
+                if calls.isEmpty || !allowTools { break }   // final answer, or tools exhausted
+
+                round += 1
+                // Echo the assistant tool-call turn so the next round has the context.
+                toolTurns.append(ChatTurn(role: Role.assistant.rawValue,
+                                          content: outcome.roundContent, toolCalls: calls))
+                for call in calls {
+                    activityStatus = "Running \(call.name)…"
+                    let result = await registry.run(call)
+                    toolTurns.append(ChatTurn(role: Role.tool.rawValue, content: result.content,
+                                              toolName: call.name, toolCallID: call.id))
+                    let record = ToolCallRecord(toolName: call.name,
+                                                arguments: call.arguments.jsonString,
+                                                result: result.content, isError: result.isError)
+                    record.message = assistant
+                    modelContext.insert(record)
+                }
+                activityStatus = "Waiting for the model…"
+            }
+            assistant.generationSeconds = Date().timeIntervalSince(started)
+            session.updatedAt = .now
+            isStreaming = false
+            await maybeGenerateTitle(for: session, client: backend)
+        } catch {
+            isStreaming = false
+            let cancelled = (error is CancellationError) || (error as? URLError)?.code == .cancelled
+            if !cancelled { errorMessage = error.localizedDescription }
+            // Drop a truly-empty bubble; keep anything the model said or any tool it ran.
+            if assistant.content.isEmpty && assistant.thinking.isEmpty && assistant.toolCallRecords.isEmpty {
+                modelContext.delete(assistant)
+            } else {
+                assistant.generationSeconds = Date().timeIntervalSince(started)
+            }
+            session.updatedAt = .now
+        }
+    }
+
+    /// Streams one round into `assistant`, accumulating content/reasoning and collecting the
+    /// round's tool-call fragments + final stats. Content appends (server backends); Apple's
+    /// replacement semantics don't apply here (Apple tool calling is a later phase).
+    private func streamRound(_ stream: AsyncThrowingStream<ChatChunk, Error>,
+                             into assistant: ChatMessage,
+                             firstRound: Bool,
+                             startedAt: Date) async throws -> RoundOutcome {
+        var outcome = RoundOutcome()
+        var sawFirstToken = !firstRound || assistant.firstTokenSeconds != nil
+        for try await chunk in stream {
+            if !sawFirstToken, !chunk.contentDelta.isEmpty || !chunk.thinkingDelta.isEmpty {
+                assistant.firstTokenSeconds = Date().timeIntervalSince(startedAt)
+                sawFirstToken = true
+                activityStatus = nil
+            }
+            if !chunk.contentDelta.isEmpty {
+                assistant.content += chunk.contentDelta
+                outcome.roundContent += chunk.contentDelta
+            }
+            if !chunk.thinkingDelta.isEmpty { assistant.thinking += chunk.thinkingDelta }
+            if !chunk.toolCallDeltas.isEmpty { outcome.toolCallDeltas.append(contentsOf: chunk.toolCallDeltas) }
+            if chunk.done {
+                outcome.doneReason = chunk.doneReason
+                outcome.promptTokens = chunk.promptTokens
+                outcome.evalTokens = chunk.evalTokens
+                outcome.evalDurationNanos = chunk.evalDurationNanos
+            }
+        }
+        return outcome
     }
 
     /// A short system instruction (opt-in, app-wide) telling the model how to emit

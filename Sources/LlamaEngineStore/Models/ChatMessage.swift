@@ -57,6 +57,11 @@ public final class ChatMessage {
     /// Inverse side of `ChatSession.messages`.
     public var session: ChatSession?
 
+    /// Audit records of tool calls made during this assistant turn (for the inspector).
+    /// Cascades on delete. Empty for turns that used no tools.
+    @Relationship(deleteRule: .cascade, inverse: \ToolCallRecord.message)
+    public var toolCallRecords: [ToolCallRecord] = []
+
     /// Typed accessor over `roleRaw`.
     public var role: Role {
         get { Role(rawValue: roleRaw) ?? .user }
@@ -91,6 +96,12 @@ public final class ChatMessage {
     public var hasInspectorData: Bool {
         requestPayload != nil || !retrievedChunks.isEmpty || firstTokenSeconds != nil
             || historyNote != nil || visionNote != nil || imageGenData != nil
+            || !toolCallRecords.isEmpty
+    }
+
+    /// Tool-call audit records for this turn, oldest first.
+    public var orderedToolCallRecords: [ToolCallRecord] {
+        toolCallRecords.sorted { $0.createdAt < $1.createdAt }
     }
 
     /// Time-to-first-token as a compact label, e.g. "0.4s".
