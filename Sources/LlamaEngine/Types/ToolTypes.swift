@@ -57,6 +57,12 @@ public extension JSONValue {
         return nil
     }
 
+    /// The integer at `key`, when this is an object whose value at `key` is a number.
+    func int(_ key: String) -> Int? {
+        if case let .object(dict) = self, case let .number(value)? = dict[key] { return Int(value) }
+        return nil
+    }
+
     /// A compact JSON string of this value, with verbatim keys ("{}" on failure). Used to
     /// serialize tool-call arguments for the wire and for the audit record.
     var jsonString: String {
