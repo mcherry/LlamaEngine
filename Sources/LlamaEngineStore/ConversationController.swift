@@ -540,7 +540,8 @@ public final class ConversationController {
                     let record = ToolCallRecord(toolName: call.name,
                                                 arguments: call.arguments.jsonString,
                                                 result: result.content, isError: result.isError,
-                                                decision: decision, durationSeconds: duration)
+                                                decision: decision, durationSeconds: duration,
+                                                imageData: result.imageData)
                     record.message = assistant
                     modelContext.insert(record)
                 }

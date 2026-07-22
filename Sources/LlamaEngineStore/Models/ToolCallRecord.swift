@@ -23,13 +23,17 @@ public final class ToolCallRecord {
     public var decision: String = "auto"
     /// Wall-clock execution time, when the tool actually ran (nil for a blocked call).
     public var durationSeconds: Double?
+    /// A PNG a tool produced for the user (e.g. render_graphic), or nil. Shown in the chat and
+    /// the inspector; the model itself only ever sees the text `result`.
+    @Attribute(.externalStorage) public var imageData: Data?
     public var createdAt: Date = Date.now
 
     /// Inverse side of `ChatMessage.toolCallRecords`.
     public var message: ChatMessage?
 
     public init(toolName: String, arguments: String, result: String, isError: Bool,
-                decision: String = "auto", durationSeconds: Double? = nil, createdAt: Date = .now) {
+                decision: String = "auto", durationSeconds: Double? = nil,
+                imageData: Data? = nil, createdAt: Date = .now) {
         self.id = UUID()
         self.toolName = toolName
         self.arguments = arguments
@@ -37,6 +41,7 @@ public final class ToolCallRecord {
         self.isError = isError
         self.decision = decision
         self.durationSeconds = durationSeconds
+        self.imageData = imageData
         self.createdAt = createdAt
     }
 }

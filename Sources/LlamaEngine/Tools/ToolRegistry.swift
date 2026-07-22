@@ -26,15 +26,19 @@ public enum ToolError: LocalizedError, Equatable {
 
 /// The outcome of running a tool, fed back to the model as a `role:"tool"` message.
 /// `content` is what the model sees; `displaySummary` is a short line for the inspector.
+/// `imageData` is an optional PNG a tool produced for the *user* to see (e.g. render_graphic)
+/// — the model only ever sees `content`, since it may not be able to view an image.
 public struct ToolResult: Sendable, Equatable {
     public var content: String
     public var displaySummary: String
     public var isError: Bool
+    public var imageData: Data?
 
-    public init(content: String, displaySummary: String? = nil, isError: Bool = false) {
+    public init(content: String, displaySummary: String? = nil, isError: Bool = false, imageData: Data? = nil) {
         self.content = content
         self.displaySummary = displaySummary ?? content
         self.isError = isError
+        self.imageData = imageData
     }
 
     /// An error result: the message is both the content the model sees and the summary.
@@ -94,6 +98,7 @@ public struct ToolRegistry: Sendable {
          GetWeatherTool(),
          WebSearchTool(),
          RetrieveContextTool(),
+         RenderGraphicTool(),
          FetchURLTool()]
     }
 

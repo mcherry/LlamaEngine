@@ -63,6 +63,24 @@ public extension JSONValue {
         return nil
     }
 
+    /// The number at `key`, when this is an object whose value at `key` is a number.
+    func double(_ key: String) -> Double? {
+        if case let .object(dict) = self, case let .number(value)? = dict[key] { return value }
+        return nil
+    }
+
+    /// The array at `key`, when this is an object whose value at `key` is an array.
+    func array(_ key: String) -> [JSONValue]? {
+        if case let .object(dict) = self, case let .array(value)? = dict[key] { return value }
+        return nil
+    }
+
+    /// This value as a number / string / array, when it is that case (for reading array
+    /// elements, which have no key).
+    var doubleValue: Double? { if case let .number(value) = self { return value }; return nil }
+    var stringValue: String? { if case let .string(value) = self { return value }; return nil }
+    var arrayValue: [JSONValue]? { if case let .array(value) = self { return value }; return nil }
+
     /// A compact JSON string of this value, with verbatim keys ("{}" on failure). Used to
     /// serialize tool-call arguments for the wire and for the audit record.
     var jsonString: String {
