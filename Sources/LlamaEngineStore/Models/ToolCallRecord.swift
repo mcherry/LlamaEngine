@@ -17,17 +17,26 @@ public final class ToolCallRecord {
     /// True when the tool failed (unknown tool, invalid arguments, or a thrown error);
     /// the error message is still fed back so the model can recover.
     public var isError: Bool = false
+    /// How the call was gated: "auto" (pure, auto-run), "confirmed"/"approved" (the user
+    /// allowed it), "denied" (disallowed or the user declined), "invalid" (bad arguments),
+    /// or "unknown" (no such tool).
+    public var decision: String = "auto"
+    /// Wall-clock execution time, when the tool actually ran (nil for a blocked call).
+    public var durationSeconds: Double?
     public var createdAt: Date = Date.now
 
     /// Inverse side of `ChatMessage.toolCallRecords`.
     public var message: ChatMessage?
 
-    public init(toolName: String, arguments: String, result: String, isError: Bool, createdAt: Date = .now) {
+    public init(toolName: String, arguments: String, result: String, isError: Bool,
+                decision: String = "auto", durationSeconds: Double? = nil, createdAt: Date = .now) {
         self.id = UUID()
         self.toolName = toolName
         self.arguments = arguments
         self.result = result
         self.isError = isError
+        self.decision = decision
+        self.durationSeconds = durationSeconds
         self.createdAt = createdAt
     }
 }

@@ -71,12 +71,23 @@ public struct ToolRegistry: Sendable {
     /// Cap on a single tool result's size before it is fed back (defends against a tool
     /// flooding the context window).
     public var maxOutputBytes: Int
+    /// Wall-clock cap on a single tool's execution before it is cancelled and reported as a
+    /// timeout (defends against a tool that hangs). Zero or negative disables the cap.
+    public var executionTimeout: TimeInterval
 
-    public init(tools: [any AgentTool], maxIterations: Int = 5, maxOutputBytes: Int = 8192) {
+    public init(tools: [any AgentTool],
+                maxIterations: Int = 5,
+                maxOutputBytes: Int = 8192,
+                executionTimeout: TimeInterval = 10) {
         self.tools = tools
         self.maxIterations = maxIterations
         self.maxOutputBytes = maxOutputBytes
+        self.executionTimeout = executionTimeout
     }
+
+    /// The built-in tools shipped with the engine, for a host to build a registry from and
+    /// present in its allow-list UI. Grows as later phases add network/local tools.
+    public static var builtInTools: [any AgentTool] { [CurrentDateTimeTool()] }
 
     /// The specs to advertise to the model. Empty registry ⇒ no tools sent.
     public var specs: [ToolSpec] { tools.map(\.spec) }
@@ -94,11 +105,35 @@ public struct ToolRegistry: Sendable {
         }
         do {
             try tool.validate(call.arguments)
-            var result = try await tool.execute(call.arguments)
+            let arguments = call.arguments
+            var result: ToolResult
+            if executionTimeout > 0 {
+                result = try await Self.withTimeout(executionTimeout) { try await tool.execute(arguments) }
+            } else {
+                result = try await tool.execute(arguments)
+            }
             result.content = Self.cap(result.content, maxBytes: maxOutputBytes)
             return result
+        } catch is ToolTimeoutError {
+            return .failure("Tool \(call.name) timed out after \(Int(executionTimeout))s.")
         } catch {
             return .failure(error.localizedDescription)
+        }
+    }
+
+    /// Runs `operation`, throwing `ToolTimeoutError` if it does not finish within `seconds`.
+    /// The losing child task is cancelled, so a tool honouring cancellation stops promptly.
+    static func withTimeout<T: Sendable>(_ seconds: TimeInterval,
+                                         operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw ToolTimeoutError()
+            }
+            defer { group.cancelAll() }
+            let result = try await group.next()!
+            return result
         }
     }
 
@@ -119,3 +154,6 @@ public struct ToolRegistry: Sendable {
         return result + marker
     }
 }
+
+/// Thrown by `ToolRegistry.withTimeout` when a tool exceeds its execution budget.
+struct ToolTimeoutError: Error {}

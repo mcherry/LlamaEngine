@@ -72,6 +72,12 @@ public struct BackendProfile: Sendable, Equatable {
 
     /// A text/LLM chat backend (as opposed to an image generator).
     public var isChatBackend: Bool { !producesImages }
+
+    /// Coarse hint that this backend can do tool calling at all, so the UI can hide the
+    /// Tools section for backends that can't. The *real* gate is the per-model
+    /// `modelCapabilities` "tools" flag; Apple Foundation Models tool calling is a later
+    /// phase, so only the streaming server backends report `true` here.
+    public var supportsTools: Bool { kind == .ollama || kind == .llamaServer }
 }
 
 public extension BackendKind {

@@ -51,6 +51,17 @@ public final class ChatSession {
     /// images then go natively to the primary model if it supports vision.
     public var visionModel: String = ""
 
+    // Tool calling (Ollama/llama.cpp only; Apple Foundation Models is a later phase). Off
+    // by default — a session sees no tool unless the user opts in. Even when enabled, each
+    // tool is individually allow-listed, and anything past a pure calculation asks for
+    // confirmation before it runs. The tool set + confirmation UI live app-side.
+    public var toolsEnabled: Bool = false
+    /// Names of the tools the user has allow-listed for this chat.
+    public var allowedToolNames: [String] = []
+    /// Names of tools the user chose "Approve for this chat" in a confirmation sheet, so a
+    /// higher-risk tool does not re-prompt on every call.
+    public var approvedToolNames: [String] = []
+
     // Image generation (when `backend == .imageGeneration`). The server URL + kind are
     // app-level (Settings); these are the per-chat model and parameters.
     public var imageModel: String = ""

@@ -53,7 +53,7 @@ public final class ConversationController {
               imageServerURL: String = "",
               imageBackendKind: String = ImageBackendKind.easyDiffusion.rawValue,
               imageWorkflowTemplate: ComfyWorkflowTemplate? = nil,
-              toolRegistry: ToolRegistry? = nil,
+              toolContext: ToolContext? = nil,
               modelContext: ModelContext) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, session.isConfigured else { return }
@@ -176,22 +176,23 @@ public final class ConversationController {
                                       keepAlive: keepAlive,
                                       parameters: session.generationParameters)
             // Tools are only wired for the streaming server backends (Apple FM tool calling
-            // is a later phase). With a non-empty registry, advertise the specs and run the
-            // bounded agent loop; otherwise the single-pass path below is unchanged.
+            // is a later phase). Engage only when the host enabled tools and allow-listed at
+            // least one; advertise only those allow-listed specs and run the bounded,
+            // policy-gated agent loop. Otherwise the single-pass path below is unchanged.
             let toolsEnabled = (session.backend == .ollama || session.backend == .llamaServer)
-                && (toolRegistry.map { !$0.specs.isEmpty } ?? false)
-            if toolsEnabled, let registry = toolRegistry {
-                request.tools = registry.specs
+                && (toolContext?.isActive ?? false)
+            if toolsEnabled, let context = toolContext {
+                request.tools = context.activeSpecs
             }
             assistant.requestPayload = RequestInspector.payload(for: request,
                                                                 backend: session.backend,
                                                                 appleOptions: session.appleOptions)
             self.activityStatus = "Waiting for the model…"
-            if toolsEnabled, let registry = toolRegistry {
+            if toolsEnabled, let context = toolContext {
                 await self.runToolLoop(backend: backend,
                                        baseRequest: request,
                                        baseTurns: turns,
-                                       registry: registry,
+                                       context: context,
                                        into: assistant,
                                        session: session,
                                        rawPromptEstimate: rawPromptTokens,
@@ -433,14 +434,18 @@ public final class ConversationController {
     func runToolLoop(backend: ChatStreaming,
                      baseRequest: ChatRequest,
                      baseTurns: [ChatTurn],
-                     registry: ToolRegistry,
+                     context: ToolContext,
                      into assistant: ChatMessage,
                      session: ChatSession,
                      rawPromptEstimate: Int,
                      modelContext: ModelContext) async {
         let started = Date()
+        let registry = context.registry
         var toolTurns: [ChatTurn] = []
         var round = 0
+        // Approvals granted during this turn (seeded from the session's remembered set) so a
+        // repeated call to the same tool within one turn does not re-prompt.
+        var turnApprovals = context.settings.approvedForSession
         defer { activityStatus = nil }
         do {
             while true {
@@ -448,7 +453,7 @@ public final class ConversationController {
                 let allowTools = round < registry.maxIterations
                 var request = baseRequest
                 request.messages = baseTurns + toolTurns
-                request.tools = allowTools ? registry.specs : []
+                request.tools = allowTools ? context.activeSpecs : []
 
                 let outcome = try await streamRound(backend.chat(request),
                                                     into: assistant,
@@ -475,12 +480,67 @@ public final class ConversationController {
                                           content: outcome.roundContent, toolCalls: calls))
                 for call in calls {
                     activityStatus = "Running \(call.name)…"
-                    let result = await registry.run(call)
+
+                    // Gate the call through the policy + human confirmation before it runs.
+                    // The tier — not the tool — drives the default: a pure tool auto-runs, a
+                    // higher tier needs approval, and anything not allow-listed is denied. A
+                    // blocked call still yields a result fed back so the model can recover.
+                    var runLabel: String?
+                    var blocked: (result: ToolResult, label: String)?
+                    if let tool = registry.tool(named: call.name) {
+                        do {
+                            try tool.validate(call.arguments)
+                            if turnApprovals.contains(tool.name) {
+                                runLabel = "approved"
+                            } else {
+                                switch context.policy.decide(tool: tool, settings: context.settings) {
+                                case .allow:
+                                    runLabel = tool.riskTier == .pure ? "auto" : "approved"
+                                case .deny(let reason):
+                                    blocked = (.failure(reason), "denied")
+                                case .needsConfirmation:
+                                    let confirmRequest = ToolConfirmationRequest(
+                                        toolName: tool.name,
+                                        toolDescription: tool.description,
+                                        riskTier: tool.riskTier,
+                                        arguments: call.arguments)
+                                    switch await context.confirm?(confirmRequest) ?? .denied {
+                                    case .approvedForSession:
+                                        turnApprovals.insert(tool.name)
+                                        runLabel = "confirmed"
+                                    case .approvedOnce:
+                                        runLabel = "confirmed"
+                                    case .denied:
+                                        blocked = (.failure("The user declined to run \(tool.name)."), "denied")
+                                    }
+                                }
+                            }
+                        } catch {
+                            blocked = (.failure(error.localizedDescription), "invalid")
+                        }
+                    } else {
+                        blocked = (.failure("Unknown tool: \(call.name)"), "unknown")
+                    }
+
+                    let result: ToolResult
+                    let decision: String
+                    var duration: Double?
+                    if let runLabel {
+                        let callStarted = Date()
+                        result = await registry.run(call)
+                        duration = Date().timeIntervalSince(callStarted)
+                        decision = runLabel
+                    } else {
+                        result = blocked?.result ?? .failure("Tool call blocked.")
+                        decision = blocked?.label ?? "denied"
+                    }
+
                     toolTurns.append(ChatTurn(role: Role.tool.rawValue, content: result.content,
                                               toolName: call.name, toolCallID: call.id))
                     let record = ToolCallRecord(toolName: call.name,
                                                 arguments: call.arguments.jsonString,
-                                                result: result.content, isError: result.isError)
+                                                result: result.content, isError: result.isError,
+                                                decision: decision, durationSeconds: duration)
                     record.message = assistant
                     modelContext.insert(record)
                 }

@@ -47,6 +47,16 @@ final class ToolLoopTests: XCTestCase {
         return (context, session, assistant)
     }
 
+    /// A tool context with tools enabled and every tool in the registry allow-listed, so a
+    /// `pure` tool auto-runs (the common case for the loop mechanics tests).
+    private func enabledContext(_ registry: ToolRegistry,
+                                confirm: ToolConfirmationHandler? = nil) -> ToolContext {
+        ToolContext(registry: registry,
+                    settings: SessionToolSettings(enabled: true,
+                                                  allowedTools: Set(registry.tools.map(\.name))),
+                    confirm: confirm)
+    }
+
     func testToolLoopExecutesToolThenAnswers() async throws {
         let (context, session, assistant) = try fixture()
         let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
@@ -62,7 +72,7 @@ final class ToolLoopTests: XCTestCase {
 
         let controller = ConversationController()
         await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
-                                     registry: registry, into: assistant, session: session,
+                                     context: enabledContext(registry), into: assistant, session: session,
                                      rawPromptEstimate: 0, modelContext: context)
 
         XCTAssertEqual(assistant.content, "The current time.")
@@ -83,7 +93,7 @@ final class ToolLoopTests: XCTestCase {
 
         let controller = ConversationController()
         await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
-                                     registry: registry, into: assistant, session: session,
+                                     context: enabledContext(registry), into: assistant, session: session,
                                      rawPromptEstimate: 0, modelContext: context)
 
         XCTAssertEqual(assistant.content, "Hello!")
@@ -104,7 +114,7 @@ final class ToolLoopTests: XCTestCase {
 
         let controller = ConversationController()
         await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
-                                     registry: registry, into: assistant, session: session,
+                                     context: enabledContext(registry), into: assistant, session: session,
                                      rawPromptEstimate: 0, modelContext: context)
 
         XCTAssertEqual(assistant.toolCallRecords.count, 2)   // capped at maxIterations
@@ -124,11 +134,133 @@ final class ToolLoopTests: XCTestCase {
 
         let controller = ConversationController()
         await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
-                                     registry: registry, into: assistant, session: session,
+                                     context: enabledContext(registry), into: assistant, session: session,
                                      rawPromptEstimate: 0, modelContext: context)
 
         XCTAssertEqual(assistant.content, "Sorry.")
         XCTAssertEqual(assistant.toolCallRecords.count, 1)
         XCTAssertTrue(assistant.orderedToolCallRecords.first?.isError ?? false)
+    }
+
+    func testConfirmedHigherTierToolRunsAndRecordsConfirmed() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .network)
+        let registry = ToolRegistry(tools: [tool])
+        let spy = ConfirmSpy(.approvedOnce)
+        let backend = StubToolBackend([
+            [ChatChunk(contentDelta: "", done: true,
+                       toolCallDeltas: [ToolCallDelta(index: 0, id: "c1", name: "stub_tool", argumentsFragment: "{}")])],
+            [ChatChunk(contentDelta: "Done.", done: true)]
+        ])
+        let base = ChatRequest(model: "qwen", messages: [ChatTurn(role: "user", content: "go")], contextSize: 4096)
+        let toolCtx = ToolContext(registry: registry,
+                                  settings: SessionToolSettings(enabled: true, allowedTools: ["stub_tool"]),
+                                  confirm: spy.handler)
+
+        let controller = ConversationController()
+        await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
+                                     context: toolCtx, into: assistant, session: session,
+                                     rawPromptEstimate: 0, modelContext: context)
+
+        XCTAssertEqual(spy.count, 1)          // a network tool was confirmed
+        XCTAssertTrue(tool.executed)
+        XCTAssertEqual(assistant.content, "Done.")
+        let record = try XCTUnwrap(assistant.orderedToolCallRecords.first)
+        XCTAssertEqual(record.decision, "confirmed")
+        XCTAssertFalse(record.isError)
+    }
+
+    func testDeniedToolDoesNotRun() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .network)
+        let registry = ToolRegistry(tools: [tool])
+        let spy = ConfirmSpy(.denied)
+        let backend = StubToolBackend([
+            [ChatChunk(contentDelta: "", done: true,
+                       toolCallDeltas: [ToolCallDelta(index: 0, id: "c1", name: "stub_tool", argumentsFragment: "{}")])],
+            [ChatChunk(contentDelta: "Okay.", done: true)]
+        ])
+        let base = ChatRequest(model: "qwen", messages: [ChatTurn(role: "user", content: "go")], contextSize: 4096)
+        let toolCtx = ToolContext(registry: registry,
+                                  settings: SessionToolSettings(enabled: true, allowedTools: ["stub_tool"]),
+                                  confirm: spy.handler)
+
+        let controller = ConversationController()
+        await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
+                                     context: toolCtx, into: assistant, session: session,
+                                     rawPromptEstimate: 0, modelContext: context)
+
+        XCTAssertEqual(spy.count, 1)          // asked, and the user declined
+        XCTAssertFalse(tool.executed)
+        let record = try XCTUnwrap(assistant.orderedToolCallRecords.first)
+        XCTAssertEqual(record.decision, "denied")
+        XCTAssertTrue(record.isError)
+    }
+
+    func testNotAllowListedToolIsDeniedWithoutConfirming() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .network)
+        let registry = ToolRegistry(tools: [tool])
+        let spy = ConfirmSpy(.approvedOnce)
+        let backend = StubToolBackend([
+            [ChatChunk(contentDelta: "", done: true,
+                       toolCallDeltas: [ToolCallDelta(index: 0, id: "c1", name: "stub_tool", argumentsFragment: "{}")])],
+            [ChatChunk(contentDelta: "Okay.", done: true)]
+        ])
+        let base = ChatRequest(model: "qwen", messages: [ChatTurn(role: "user", content: "go")], contextSize: 4096)
+        // Tools enabled, but this tool is NOT allow-listed → policy denies without confirming.
+        let toolCtx = ToolContext(registry: registry,
+                                  settings: SessionToolSettings(enabled: true, allowedTools: []),
+                                  confirm: spy.handler)
+
+        let controller = ConversationController()
+        await controller.runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
+                                     context: toolCtx, into: assistant, session: session,
+                                     rawPromptEstimate: 0, modelContext: context)
+
+        XCTAssertEqual(spy.count, 0)          // never even asked
+        XCTAssertFalse(tool.executed)
+        let record = try XCTUnwrap(assistant.orderedToolCallRecords.first)
+        XCTAssertEqual(record.decision, "denied")
+    }
+}
+
+/// A stub tool with a configurable risk tier that records whether it actually executed.
+private final class RecordingTool: AgentTool, @unchecked Sendable {
+    let name: String
+    let description = "A stub tool for tests."
+    let parameters = JSONSchema.empty
+    let riskTier: ToolRiskTier
+    private let lock = NSLock()
+    private var didExecute = false
+    var executed: Bool { lock.withLock { didExecute } }
+
+    init(name: String = "stub_tool", tier: ToolRiskTier) {
+        self.name = name
+        self.riskTier = tier
+    }
+
+    func validate(_ arguments: JSONValue) throws {}
+    func execute(_ arguments: JSONValue) async throws -> ToolResult {
+        lock.withLock { didExecute = true }
+        return ToolResult(content: "ran")
+    }
+}
+
+/// A confirmation handler that returns a fixed outcome and counts how many times it was asked.
+private final class ConfirmSpy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private let outcome: ToolConfirmationOutcome
+
+    init(_ outcome: ToolConfirmationOutcome) { self.outcome = outcome }
+
+    var count: Int { lock.withLock { calls } }
+
+    var handler: ToolConfirmationHandler {
+        { [self] _ in
+            lock.withLock { calls += 1 }
+            return outcome
+        }
     }
 }
