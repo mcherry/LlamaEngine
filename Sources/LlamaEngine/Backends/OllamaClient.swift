@@ -258,6 +258,7 @@ public struct OllamaClient: Sendable, ServerBackend {
             stream: request.stream,
             think: request.think,
             keepAlive: request.keepAlive,
+            tools: request.tools.isEmpty ? nil : request.tools.map(ToolWireEnvelope.init),
             options: .init(numCtx: request.contextSize,
                            numPredict: request.numPredict,
                            temperature: p.temperature,
@@ -325,6 +326,7 @@ public struct OllamaClient: Sendable, ServerBackend {
         if let error = parsed.error {
             throw OllamaError.server(error)
         }
+        let toolCallDeltas = trimmed.contains("tool_calls") ? parseToolCalls(data) : []
         return ChatChunk(
             contentDelta: parsed.message?.content ?? "",
             done: parsed.done ?? false,
@@ -332,8 +334,32 @@ public struct OllamaClient: Sendable, ServerBackend {
             evalTokens: parsed.evalCount,
             evalDurationNanos: parsed.evalDuration,
             thinkingDelta: parsed.message?.thinking ?? "",
-            doneReason: parsed.doneReason
+            doneReason: parsed.doneReason,
+            toolCallDeltas: toolCallDeltas
         )
+    }
+
+    /// Extracts streamed tool calls from an Ollama `/api/chat` line. Ollama delivers each
+    /// call complete with `arguments` as a JSON object, so this re-serializes the arguments
+    /// to a compact string with verbatim keys (unaffected by the decoder's snake_case
+    /// strategy) for `ToolCallAssembler` to normalize alongside llama.cpp's fragments.
+    /// Pure and static so it can be unit-tested without a server.
+    static func parseToolCalls(_ data: Data) -> [ToolCallDelta] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = root["message"] as? [String: Any],
+              let calls = message["tool_calls"] as? [[String: Any]] else { return [] }
+        return calls.enumerated().compactMap { index, call in
+            guard let function = call["function"] as? [String: Any],
+                  let name = function["name"] as? String else { return nil }
+            var argumentsFragment = ""
+            if let args = function["arguments"], JSONSerialization.isValidJSONObject(args),
+               let argData = try? JSONSerialization.data(withJSONObject: args),
+               let argString = String(data: argData, encoding: .utf8) {
+                argumentsFragment = argString
+            }
+            return ToolCallDelta(index: index, id: call["id"] as? String,
+                                 name: name, argumentsFragment: argumentsFragment)
+        }
     }
 }
 
@@ -347,6 +373,8 @@ private struct ChatRequestBody: Encodable {
     let think: Bool?
     /// How long to keep the model loaded (`keep_alive`). Omitted when `nil`.
     let keepAlive: String?
+    /// Tool definitions in the OpenAI `{type,function}` envelope. Omitted when `nil`.
+    let tools: [ToolWireEnvelope]?
     let options: Options
 
     struct Options: Encodable {

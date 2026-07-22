@@ -100,6 +100,10 @@ public struct ChatRequest: Sendable {
     public var keepAlive: String?
     /// Sampling parameters (temperature, seed, …). Empty by default.
     public var parameters: GenerationParameters
+    /// Tool/function definitions offered to the model. Empty by default, so it is omitted
+    /// from the wire body and existing requests stay byte-identical. The model may respond
+    /// with tool calls; nothing runs automatically.
+    public var tools: [ToolSpec]
 
     public init(model: String,
                 messages: [ChatTurn],
@@ -108,7 +112,8 @@ public struct ChatRequest: Sendable {
                 numPredict: Int? = nil,
                 think: Bool? = nil,
                 keepAlive: String? = nil,
-                parameters: GenerationParameters = GenerationParameters()) {
+                parameters: GenerationParameters = GenerationParameters(),
+                tools: [ToolSpec] = []) {
         self.model = model
         self.messages = messages
         self.contextSize = contextSize
@@ -117,6 +122,7 @@ public struct ChatRequest: Sendable {
         self.think = think
         self.keepAlive = keepAlive
         self.parameters = parameters
+        self.tools = tools
     }
 }
 
@@ -137,6 +143,9 @@ public struct ChatChunk: Sendable {
     /// Ollama's reason for finishing (`done_reason`): "stop" (natural end), "length"
     /// (hit the context/token limit, so the reply was cut off), etc. nil until `done`.
     public var doneReason: String? = nil
+    /// Raw streamed tool-call fragments (accumulated by `ToolCallAssembler`). Empty on a
+    /// normal text chunk.
+    public var toolCallDeltas: [ToolCallDelta] = []
 
     public init(contentDelta: String,
                 done: Bool,
@@ -145,7 +154,8 @@ public struct ChatChunk: Sendable {
                 evalDurationNanos: Int? = nil,
                 isReplacement: Bool = false,
                 thinkingDelta: String = "",
-                doneReason: String? = nil) {
+                doneReason: String? = nil,
+                toolCallDeltas: [ToolCallDelta] = []) {
         self.contentDelta = contentDelta
         self.done = done
         self.promptTokens = promptTokens
@@ -154,5 +164,6 @@ public struct ChatChunk: Sendable {
         self.isReplacement = isReplacement
         self.thinkingDelta = thinkingDelta
         self.doneReason = doneReason
+        self.toolCallDeltas = toolCallDeltas
     }
 }

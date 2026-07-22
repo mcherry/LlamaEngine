@@ -74,6 +74,30 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         return response.data?.compactMap { $0.meta?.nCtx }.first(where: { $0 > 0 })
     }
 
+    /// The loaded model's capabilities from `GET /props` (`chat_template_caps.supports_tools`
+    /// and `modalities.vision`), as tags like `["tools", "vision"]`. Empty when the server is
+    /// too old to report `chat_template_caps`, which callers treat as "unknown". `name` is
+    /// ignored (the server serves one model).
+    public func modelCapabilities(_ name: String) async throws -> [String] {
+        let data = try await get("props")
+        return Self.parseProps(data)
+    }
+
+    /// Parses `/props` into capability tags. Pure/static for testing. llama.cpp's
+    /// `/v1/models` reports only `["completion"]`, so tool/vision support must come from here.
+    public static func parseProps(_ data: Data) -> [String] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        var caps: [String] = []
+        if let templateCaps = root["chat_template_caps"] as? [String: Any],
+           (templateCaps["supports_tools"] as? Bool == true) || (templateCaps["supports_tool_calls"] as? Bool == true) {
+            caps.append("tools")
+        }
+        if let modalities = root["modalities"] as? [String: Any], modalities["vision"] as? Bool == true {
+            caps.append("vision")
+        }
+        return caps
+    }
+
     /// Batch-embeds `input` strings via `/v1/embeddings` (OpenAI shape). Returns one
     /// vector per input, in order. Used by the retrieval (RAG) context strategy. The
     /// server must be started with `--embeddings` and an OpenAI-compatible pooling type
@@ -136,10 +160,11 @@ public struct LlamaServerClient: Sendable, ServerBackend {
                             emittedDone = true
                             break
                         }
-                        if !event.content.isEmpty || !event.reasoning.isEmpty {
+                        if !event.content.isEmpty || !event.reasoning.isEmpty || !event.toolCallDeltas.isEmpty {
                             continuation.yield(ChatChunk(contentDelta: event.content,
                                                          done: false,
-                                                         thinkingDelta: event.reasoning))
+                                                         thinkingDelta: event.reasoning,
+                                                         toolCallDeltas: event.toolCallDeltas))
                         }
                     }
                     // Some servers close the stream without a `[DONE]` line; still emit a
@@ -216,7 +241,8 @@ public struct LlamaServerClient: Sendable, ServerBackend {
             repeatPenalty: p.repeatPenalty,
             seed: p.seed,
             stop: p.stop.isEmpty ? nil : p.stop,
-            streamOptions: .init(includeUsage: true)
+            streamOptions: .init(includeUsage: true),
+            tools: request.tools.isEmpty ? nil : request.tools.map(ToolWireEnvelope.init)
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -229,6 +255,8 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         public var content: String = ""
         public var reasoning: String = ""
         public var finishReason: String?
+        /// Raw streamed tool-call fragments, merged by `ToolCallAssembler`.
+        public var toolCallDeltas: [ToolCallDelta] = []
         public var promptTokens: Int?
         public var completionTokens: Int?
         public var evalDurationNanos: Int?
@@ -260,6 +288,10 @@ public struct LlamaServerClient: Sendable, ServerBackend {
             event.content = choice.delta?.content ?? ""
             event.reasoning = choice.delta?.reasoningContent ?? ""
             event.finishReason = choice.finishReason
+            event.toolCallDeltas = (choice.delta?.toolCalls ?? []).map {
+                ToolCallDelta(index: $0.index, id: $0.id, name: $0.function?.name,
+                              argumentsFragment: $0.function?.arguments ?? "")
+            }
         }
         event.promptTokens = chunk.usage?.promptTokens ?? chunk.timings?.promptN
         event.completionTokens = chunk.usage?.completionTokens ?? chunk.timings?.predictedN
@@ -326,6 +358,8 @@ private struct ChatBody: Encodable {
     var seed: Int?
     var stop: [String]?
     let streamOptions: StreamOptions?
+    /// Tool definitions in the OpenAI `{type,function}` envelope. Omitted when `nil`.
+    let tools: [ToolWireEnvelope]?
 
     struct Message: Encodable {
         let role: String
@@ -363,6 +397,16 @@ struct CompletionChunk: Decodable {
         struct Delta: Decodable {
             let content: String?
             let reasoningContent: String?
+            let toolCalls: [ToolCallFragment]?
+            struct ToolCallFragment: Decodable {
+                let index: Int
+                let id: String?
+                let function: Function?
+                struct Function: Decodable {
+                    let name: String?
+                    let arguments: String?
+                }
+            }
         }
     }
 
