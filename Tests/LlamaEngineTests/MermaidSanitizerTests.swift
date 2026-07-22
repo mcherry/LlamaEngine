@@ -128,4 +128,57 @@ final class MermaidSanitizerTests: XCTestCase {
         XCTAssertEqual(MermaidSanitizer.repair(src),
                        "graph TD\n A[\"x (1)\"] --> B[\"y (2)\"]")
     }
+
+    // MARK: - Typographic normalization
+
+    func testNormalizesSmartQuotesInFlowchartLabel() {
+        // The exact reported failure: curly quotes wrapping a node label.
+        let src = "graph TD\n P --> Q[\u{201C}No Taxation Without Representation\u{201D}]"
+        let fixed = MermaidSanitizer.repair(src)
+        XCTAssertEqual(fixed, "graph TD\n P --> Q[\"No Taxation Without Representation\"]")
+        XCTAssertFalse(fixed.unicodeScalars.contains("\u{201C}"))
+    }
+
+    func testNormalizesArrowInLabelThenQuotes() {
+        // The next failure in the same diagram: a → inside a label.
+        let src = "graph TD\n P --> S[Eventually \u{2192} Independence]"
+        XCTAssertEqual(MermaidSanitizer.repair(src),
+                       "graph TD\n P --> S[\"Eventually -> Independence\"]")
+    }
+
+    func testNormalizesDashesEllipsisAndApostrophe() {
+        let raw = "a \u{2014} b \u{2013} c \u{2212} d\u{2026} it\u{2019}s"
+        XCTAssertEqual(MermaidSanitizer.normalizeTypography(raw), "a - b - c - d... it's")
+    }
+
+    func testStripsInvisiblesAndCollapsesSpaces() {
+        // zero-width space (drop), NBSP (→ space), BOM (drop), soft hyphen (drop).
+        let raw = "A\u{200B}B\u{00A0}C\u{FEFF}D\u{00AD}E"
+        XCTAssertEqual(MermaidSanitizer.normalizeTypography(raw), "AB CDE")
+    }
+
+    func testNormalizesLineEndings() {
+        XCTAssertEqual(MermaidSanitizer.normalizeTypography("a\r\nb\rc\u{2028}d"), "a\nb\nc\nd")
+    }
+
+    func testNormalizesFullwidthPunctuation() {
+        // Full-width parens become ASCII, then the round-node label (with brackets) quotes.
+        let src = "graph TD\n A\u{FF08}x [1]\u{FF09} --> B"
+        XCTAssertEqual(MermaidSanitizer.repair(src), "graph TD\n A(\"x [1]\") --> B")
+    }
+
+    func testNormalizationAppliesToNonFlowcharts() {
+        // Smart quotes in a sequence-diagram message are normalized even though the
+        // label-quoting repair is flowchart-only.
+        let src = "sequenceDiagram\n Alice->>John: He said \u{201C}hi\u{201D}"
+        XCTAssertEqual(MermaidSanitizer.repair(src),
+                       "sequenceDiagram\n Alice->>John: He said \"hi\"")
+    }
+
+    func testEmbeddedStraightQuoteMidLabelGetsQuoted() {
+        // A stray double-quote mid-label (no other trigger) now forces quoting + escape.
+        let src = "graph TD\n A[He said \"hi\" today] --> B"
+        XCTAssertEqual(MermaidSanitizer.repair(src),
+                       "graph TD\n A[\"He said #quot;hi#quot; today\"] --> B")
+    }
 }
