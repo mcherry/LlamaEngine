@@ -36,20 +36,58 @@ public struct ChatTurn: Codable, Sendable {
     /// Base64-encoded images for vision models (Ollama's `images` field). Omitted
     /// from the wire payload when empty.
     public let images: [String]
+    /// Tool calls this (assistant) turn proposed. Echoed back so the model has the context
+    /// of what it asked before it sees the results. Omitted from the wire when empty.
+    public let toolCalls: [ToolCall]
+    /// The tool name a `role:"tool"` result turn answers (Ollama's `tool_name`). Omitted when nil.
+    public let toolName: String?
+    /// The tool-call id a `role:"tool"` result turn answers (OpenAI/llama.cpp's `tool_call_id`).
+    /// Not encoded by Ollama (which keys results by name). Omitted when nil.
+    public let toolCallID: String?
 
-    public init(role: String, content: String, images: [String] = []) {
+    public init(role: String, content: String, images: [String] = [],
+                toolCalls: [ToolCall] = [], toolName: String? = nil, toolCallID: String? = nil) {
         self.role = role
         self.content = content
         self.images = images
+        self.toolCalls = toolCalls
+        self.toolName = toolName
+        self.toolCallID = toolCallID
     }
 
-    enum CodingKeys: String, CodingKey { case role, content, images }
+    enum CodingKeys: String, CodingKey { case role, content, images, toolCalls, toolName }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(role, forKey: .role)
         try c.encode(content, forKey: .content)
         if !images.isEmpty { try c.encode(images, forKey: .images) }
+        // Ollama wire: assistant tool_calls carry arguments as a JSON object; a tool result
+        // turn carries tool_name. (llama.cpp uses tool_call_id instead — see LlamaServerClient.)
+        if !toolCalls.isEmpty { try c.encode(toolCalls.map(OllamaToolCall.init), forKey: .toolCalls) }
+        if let toolName { try c.encode(toolName, forKey: .toolName) }
+    }
+
+    // ChatTurn is only ever encoded (into a request body); a tolerant decoder is provided
+    // solely to keep the public `Codable` conformance.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decodeIfPresent(String.self, forKey: .content) ?? ""
+        images = try c.decodeIfPresent([String].self, forKey: .images) ?? []
+        toolCalls = try c.decodeIfPresent([ToolCall].self, forKey: .toolCalls) ?? []
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
+        toolCallID = nil
+    }
+}
+
+/// The Ollama `/api/chat` shape of an assistant tool call: `{function:{name, arguments:<object>}}`.
+private struct OllamaToolCall: Encodable {
+    let function: Function
+    init(_ call: ToolCall) { function = Function(name: call.name, arguments: call.arguments) }
+    struct Function: Encodable {
+        let name: String
+        let arguments: JSONValue
     }
 }
 

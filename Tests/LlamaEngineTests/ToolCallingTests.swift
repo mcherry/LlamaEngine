@@ -197,4 +197,119 @@ final class ToolCallingTests: XCTestCase {
     func testParsePropsEmptyWhenNoCaps() {
         XCTAssertTrue(LlamaServerClient.parseProps(Data(#"{"build_info":"b10066"}"#.utf8)).isEmpty)
     }
+
+    // MARK: - Tool registry + result cap
+
+    func testToolResultCapTruncatesAtByteBudget() {
+        let capped = ToolRegistry.cap(String(repeating: "a", count: 100), maxBytes: 20)
+        XCTAssertTrue(capped.hasSuffix("…[truncated]"))
+        XCTAssertLessThanOrEqual(capped.utf8.count, 20)
+    }
+
+    func testToolResultCapLeavesShortTextUnchanged() {
+        XCTAssertEqual(ToolRegistry.cap("hi", maxBytes: 20), "hi")
+    }
+
+    func testRegistrySpecsAndLookup() {
+        let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
+        XCTAssertEqual(registry.specs.map(\.name), ["current_datetime"])
+        XCTAssertNotNil(registry.tool(named: "current_datetime"))
+        XCTAssertNil(registry.tool(named: "nope"))
+    }
+
+    func testRegistryRunUnknownToolReturnsError() async {
+        let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
+        let result = await registry.run(ToolCall(id: "1", name: "nope", arguments: .object([:])))
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.contains("Unknown tool"))
+    }
+
+    func testRegistryRunValidCallSucceeds() async {
+        let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
+        let result = await registry.run(ToolCall(id: "1", name: "current_datetime",
+                                                 arguments: .object(["timezone": .string("UTC")])))
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("UTC"))
+    }
+
+    func testRegistryRunInvalidArgumentsBecomeErrorResult() async {
+        let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
+        let result = await registry.run(ToolCall(id: "1", name: "current_datetime",
+                                                 arguments: .object(["timezone": .string("Nowhere/Fake")])))
+        XCTAssertTrue(result.isError)
+    }
+
+    // MARK: - current_datetime tool
+
+    func testCurrentDateTimeSpecIsPure() {
+        let tool = CurrentDateTimeTool()
+        XCTAssertEqual(tool.name, "current_datetime")
+        XCTAssertEqual(tool.riskTier, .pure)
+        XCTAssertEqual(tool.spec.name, "current_datetime")
+    }
+
+    func testCurrentDateTimeFormatIsDeterministic() throws {
+        let epoch = Date(timeIntervalSince1970: 0)
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        XCTAssertEqual(CurrentDateTimeTool.format(epoch, timeZone: utc, zoneName: "UTC"), "1970-01-01 00:00:00 UTC")
+    }
+
+    func testCurrentDateTimeValidation() throws {
+        try CurrentDateTimeTool().validate(.object([:]))                                   // no zone = UTC
+        try CurrentDateTimeTool().validate(.object(["timezone": .string("America/New_York")]))
+        XCTAssertThrowsError(try CurrentDateTimeTool().validate(.object(["timezone": .string("Mars/Olympus")])))
+    }
+
+    func testCurrentDateTimeExecuteRuns() async throws {
+        let result = try await CurrentDateTimeTool().execute(.object(["timezone": .string("UTC")]))
+        XCTAssertFalse(result.isError)
+        XCTAssertTrue(result.content.contains("UTC"))
+    }
+
+    // MARK: - Tool feedback wire encoding
+
+    private func message(role: String, in body: [String: Any]) throws -> [String: Any] {
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        return try XCTUnwrap(messages.first { $0["role"] as? String == role })
+    }
+
+    func testOllamaEncodesAssistantToolCallTurn() throws {
+        let call = ToolCall(id: "c1", name: "get_weather", arguments: .object(["city": .string("Rome")]))
+        let request = ChatRequest(model: "m", messages: [ChatTurn(role: "assistant", content: "", toolCalls: [call])],
+                                  contextSize: 4096)
+        let assistant = try message(role: "assistant", in: try ollamaBody(request))
+        let toolCalls = try XCTUnwrap(assistant["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls[0]["function"] as? [String: Any])
+        XCTAssertEqual(function["name"] as? String, "get_weather")
+        XCTAssertEqual((function["arguments"] as? [String: Any])?["city"] as? String, "Rome")  // object args
+    }
+
+    func testOllamaEncodesToolResultTurn() throws {
+        let turn = ChatTurn(role: "tool", content: "22C", toolName: "get_weather", toolCallID: "c1")
+        let toolMessage = try message(role: "tool", in: try ollamaBody(ChatRequest(model: "m", messages: [turn], contextSize: 4096)))
+        XCTAssertEqual(toolMessage["tool_name"] as? String, "get_weather")
+        XCTAssertEqual(toolMessage["content"] as? String, "22C")
+        XCTAssertNil(toolMessage["tool_call_id"])   // Ollama keys results by name, not id
+    }
+
+    func testLlamaServerEncodesAssistantToolCallTurn() throws {
+        let call = ToolCall(id: "c1", name: "get_weather", arguments: .object(["city": .string("Rome")]))
+        let request = ChatRequest(model: "m", messages: [ChatTurn(role: "assistant", content: "", toolCalls: [call])],
+                                  contextSize: 4096)
+        let assistant = try message(role: "assistant", in: try llamaBody(request))
+        let toolCalls = try XCTUnwrap(assistant["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(toolCalls[0]["id"] as? String, "c1")
+        XCTAssertEqual(toolCalls[0]["type"] as? String, "function")
+        let function = try XCTUnwrap(toolCalls[0]["function"] as? [String: Any])
+        XCTAssertEqual(function["name"] as? String, "get_weather")
+        XCTAssertEqual(function["arguments"] as? String, #"{"city":"Rome"}"#)  // string args
+    }
+
+    func testLlamaServerEncodesToolResultTurn() throws {
+        let turn = ChatTurn(role: "tool", content: "22C", toolName: "get_weather", toolCallID: "c1")
+        let toolMessage = try message(role: "tool", in: try llamaBody(ChatRequest(model: "m", messages: [turn], contextSize: 4096)))
+        XCTAssertEqual(toolMessage["tool_call_id"] as? String, "c1")
+        XCTAssertEqual(toolMessage["content"] as? String, "22C")
+        XCTAssertNil(toolMessage["tool_name"])      // llama.cpp keys results by id
+    }
 }

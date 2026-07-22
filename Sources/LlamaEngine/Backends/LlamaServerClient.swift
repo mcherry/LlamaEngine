@@ -225,7 +225,17 @@ public struct LlamaServerClient: Sendable, ServerBackend {
     /// and the internal non-streaming callers, which simply concatenate the deltas.
     /// Pure and static so the exact payload can be unit-tested without a server.
     public static func encodeChatBody(_ request: ChatRequest) throws -> Data {
-        var messages = request.messages.map { ChatBody.Message(role: $0.role, content: $0.content) }
+        var messages = request.messages.map { turn in
+            ChatBody.Message(
+                role: turn.role,
+                content: turn.content,
+                toolCalls: turn.toolCalls.isEmpty ? nil : turn.toolCalls.map {
+                    ChatBody.Message.ToolCallWire(
+                        id: $0.id,
+                        function: .init(name: $0.name, arguments: Self.encodeArguments($0.arguments)))
+                },
+                toolCallId: turn.toolCallID)
+        }
         if let effort = reasoningEffort(for: request.think) {
             messages.insert(ChatBody.Message(role: Role.system.rawValue, content: "Reasoning: \(effort)"), at: 0)
         }
@@ -247,6 +257,14 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         return try encoder.encode(body)
+    }
+
+    /// Serializes tool-call arguments to a compact JSON string (the OpenAI wire form) with
+    /// verbatim keys — no snake_case strategy. Falls back to "{}" on failure.
+    static func encodeArguments(_ value: JSONValue) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let string = String(data: data, encoding: .utf8) else { return "{}" }
+        return string
     }
 
     /// One parsed Server-Sent Events line. A plain `Sendable`/`Equatable` value so the
@@ -364,6 +382,20 @@ private struct ChatBody: Encodable {
     struct Message: Encodable {
         let role: String
         let content: String
+        var toolCalls: [ToolCallWire]? = nil
+        var toolCallId: String? = nil
+
+        /// An assistant tool call in OpenAI shape: `{id, type:"function", function:{name, arguments}}`
+        /// where `arguments` is a JSON *string*.
+        struct ToolCallWire: Encodable {
+            let id: String
+            let type = "function"
+            let function: Function
+            struct Function: Encodable {
+                let name: String
+                let arguments: String
+            }
+        }
     }
 
     struct StreamOptions: Encodable {
