@@ -71,8 +71,9 @@ public struct FoundationModelsBackend: ChatStreaming {
 
     /// Maps our plain options onto Apple's `GenerationOptions`, choosing a sampling
     /// strategy. A seed is honored only by the random modes, for reproducibility.
+    /// Internal so the tool-calling session (`AppleToolSession`) can reuse it.
     @available(macOS 26, iOS 26, *)
-    private static func makeOptions(_ o: AppleGenerationOptions) -> GenerationOptions {
+    static func makeOptions(_ o: AppleGenerationOptions) -> GenerationOptions {
         let sampling: GenerationOptions.SamplingMode?
         switch o.samplingMode {
         case .automatic:

@@ -75,9 +75,10 @@ public struct BackendProfile: Sendable, Equatable {
 
     /// Coarse hint that this backend can do tool calling at all, so the UI can hide the
     /// Tools section for backends that can't. The *real* gate is the per-model
-    /// `modelCapabilities` "tools" flag; Apple Foundation Models tool calling is a later
-    /// phase, so only the streaming server backends report `true` here.
-    public var supportsTools: Bool { kind == .ollama || kind == .llamaServer }
+    /// `modelCapabilities` "tools" flag (server backends) or on-device availability (Apple).
+    /// The streaming servers drive the loop themselves; Apple Foundation Models runs its own
+    /// tool loop and needs macOS/iPadOS 26, but is genuinely tool-capable there.
+    public var supportsTools: Bool { kind == .ollama || kind == .llamaServer || kind == .appleIntelligence }
 }
 
 public extension BackendKind {

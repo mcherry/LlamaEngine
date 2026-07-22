@@ -175,20 +175,21 @@ public final class ConversationController {
                                       think: session.reasoningMode.think,
                                       keepAlive: keepAlive,
                                       parameters: session.generationParameters)
-            // Tools are only wired for the streaming server backends (Apple FM tool calling
-            // is a later phase). Engage only when the host enabled tools and allow-listed at
-            // least one; advertise only those allow-listed specs and run the bounded,
-            // policy-gated agent loop. Otherwise the single-pass path below is unchanged.
-            let toolsEnabled = (session.backend == .ollama || session.backend == .llamaServer)
-                && (toolContext?.isActive ?? false)
-            if toolsEnabled, let context = toolContext {
+            // Tools engage when the host enabled them and allow-listed at least one. The
+            // streaming servers hand us the tool calls, so we drive the bounded, policy-gated
+            // loop (runToolLoop). Apple Foundation Models runs its own tool loop inside the
+            // framework, so that goes through a bridged session (macOS/iPadOS 26+) instead.
+            let serverBackend = session.backend == .ollama || session.backend == .llamaServer
+            let toolsEnabled = (toolContext?.isActive ?? false)
+                && (serverBackend || session.backend == .appleIntelligence)
+            if toolsEnabled, serverBackend, let context = toolContext {
                 request.tools = context.activeSpecs
             }
             assistant.requestPayload = RequestInspector.payload(for: request,
                                                                 backend: session.backend,
                                                                 appleOptions: session.appleOptions)
             self.activityStatus = "Waiting for the model…"
-            if toolsEnabled, let context = toolContext {
+            if toolsEnabled, serverBackend, let context = toolContext {
                 await self.runToolLoop(backend: backend,
                                        baseRequest: request,
                                        baseTurns: turns,
@@ -197,6 +198,23 @@ public final class ConversationController {
                                        session: session,
                                        rawPromptEstimate: rawPromptTokens,
                                        modelContext: modelContext)
+            } else if toolsEnabled, let context = toolContext {
+                // Apple Foundation Models with tools — the framework owns the loop.
+                #if canImport(FoundationModels)
+                if #available(macOS 26, iOS 26, *) {
+                    await self.runAppleToolSession(turns: turns, context: context, titleBackend: backend,
+                                                   into: assistant, session: session,
+                                                   rawPromptEstimate: rawPromptTokens, modelContext: modelContext)
+                } else {
+                    await self.consume(backend.chat(request), into: assistant, session: session,
+                                       titleBackend: backend, rawPromptEstimate: rawPromptTokens,
+                                       modelContext: modelContext)
+                }
+                #else
+                await self.consume(backend.chat(request), into: assistant, session: session,
+                                   titleBackend: backend, rawPromptEstimate: rawPromptTokens,
+                                   modelContext: modelContext)
+                #endif
             } else {
                 await self.consume(backend.chat(request),
                                    into: assistant,
@@ -595,6 +613,80 @@ public final class ConversationController {
         }
         return outcome
     }
+
+    #if canImport(FoundationModels)
+    /// Runs an on-device Apple Foundation Models turn *with tools*. Unlike the servers, the
+    /// framework owns the tool loop, so we hand it bridged tools (which run the same policy +
+    /// confirmation gate) and just stream the assistant text. Apple yields cumulative content
+    /// snapshots, so we *replace* `assistant.content` each step (servers append). Tool
+    /// executions accumulate in a `Sendable` collector — never touching a `@Model` from the
+    /// framework's executor — and become audit records here on the main actor afterward.
+    @available(macOS 26, iOS 26, *)
+    func runAppleToolSession(turns: [ChatTurn],
+                             context: ToolContext,
+                             titleBackend: ChatStreaming,
+                             into assistant: ChatMessage,
+                             session: ChatSession,
+                             rawPromptEstimate: Int,
+                             modelContext: ModelContext) async {
+        let started = Date()
+        defer { activityStatus = nil }
+        let (instructions, prompt) = FoundationModelsBackend.render(turns)
+        let tools = context.registry.tools.filter { context.settings.allowedTools.contains($0.name) }
+        let collector = AppleToolCollector()
+        var sawContent = false
+        do {
+            for try await snapshot in AppleToolSession.stream(instructions: instructions,
+                                                              prompt: prompt,
+                                                              tools: tools,
+                                                              context: context,
+                                                              options: session.appleOptions,
+                                                              collector: collector) {
+                try Task.checkCancellation()
+                if !sawContent, !snapshot.isEmpty {
+                    assistant.firstTokenSeconds = Date().timeIntervalSince(started)
+                    sawContent = true
+                    activityStatus = nil
+                }
+                assistant.content = snapshot   // Apple streams cumulative snapshots.
+            }
+            await recordAppleToolCalls(collector, into: assistant, modelContext: modelContext)
+            assistant.generationSeconds = Date().timeIntervalSince(started)
+            session.updatedAt = .now
+            isStreaming = false
+            await maybeGenerateTitle(for: session, client: titleBackend)
+        } catch {
+            await recordAppleToolCalls(collector, into: assistant, modelContext: modelContext)
+            isStreaming = false
+            let cancelled = (error is CancellationError) || (error as? URLError)?.code == .cancelled
+            if !cancelled { errorMessage = error.localizedDescription }
+            if assistant.content.isEmpty && assistant.thinking.isEmpty && assistant.toolCallRecords.isEmpty {
+                modelContext.delete(assistant)
+            } else {
+                assistant.generationSeconds = Date().timeIntervalSince(started)
+            }
+            session.updatedAt = .now
+        }
+    }
+
+    /// Drains the tool-execution collector and turns each entry into a persisted
+    /// `ToolCallRecord` child of `assistant` (mirrors what `runToolLoop` records per call).
+    private func recordAppleToolCalls(_ collector: AppleToolCollector,
+                                      into assistant: ChatMessage,
+                                      modelContext: ModelContext) async {
+        for entry in await collector.drain() {
+            let record = ToolCallRecord(toolName: entry.toolName,
+                                        arguments: entry.argumentsJSON,
+                                        result: entry.result.content,
+                                        isError: entry.result.isError,
+                                        decision: entry.decision,
+                                        durationSeconds: entry.durationSeconds,
+                                        imageData: entry.result.imageData)
+            record.message = assistant
+            modelContext.insert(record)
+        }
+    }
+    #endif
 
     /// A short system instruction (opt-in, app-wide) telling the model how to emit
     /// diagrams so they render cleanly inline. Addresses two common model habits:
