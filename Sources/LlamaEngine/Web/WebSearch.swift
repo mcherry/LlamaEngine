@@ -24,7 +24,7 @@ public struct WebSearchConfig: Sendable {
                 exaAPIKey: String = "",
                 linkupAPIKey: String = "",
                 tinyfishAPIKey: String = "",
-                marginaliaAPIKey: String = "public",
+                marginaliaAPIKey: String = "",
                 enabledProviders: Set<WebSearch.ProviderKind> = Set(WebSearch.catalog),
                 metaMode: WebSearch.MetaSearchMode = .comprehensive) {
         self.provider = provider
@@ -57,8 +57,9 @@ public struct SearchCapabilities: Sendable, Equatable {
 /// Web search for context, **provider-agnostic** and using only *sanctioned* APIs — never
 /// scraping a search engine's HTML (which is what gets blocked). The user picks a provider
 /// in Settings: **Wikipedia** (no key) or a self-hosted **SearXNG** instance (no key); the
-/// independent **Marginalia** engine (a shared `public` key, or a free personal one); or the
-/// keyed **Brave** / **Tavily** APIs. Result fetching still goes through `WebAccess` (robots
+/// independent **Marginalia** engine (needs a free personal key — the shared `public` key is
+/// almost always rate-limited); or the keyed **Brave** / **Tavily** / **Exa** / … APIs. Result
+/// fetching still goes through `WebAccess` (robots
 /// + rate limits). The response decoders are pure, so parsing is unit-testable.
 public enum WebSearch {
 
@@ -184,7 +185,7 @@ public enum WebSearch {
             case .none: return ""
             case .wikipedia: return "English Wikipedia — great for history, places, and general facts. No account needed."
             case .searxng: return "A self-hosted SearXNG instance that aggregates real engines. No account needed."
-            case .marginalia: return "An independent engine for text-heavy, non-commercial pages. Works out of the box with the shared “public” key."
+            case .marginalia: return "An independent engine for text-heavy, non-commercial pages. Needs a free personal key (the project emails you one); the shared “public” key is almost always rate-limited."
             case .brave: return "Brave’s own independent search index, with a generous free tier."
             case .tavily: return "An LLM-focused search API with a free tier."
             case .exa: return "Neural + keyword search built for AI, with free monthly credits."
@@ -361,9 +362,11 @@ public enum WebSearch {
             let base = config.searxngURL.trimmingCharacters(in: .whitespaces)
             return base.isEmpty ? nil : SearXNGProvider(baseURL: base)
         case .marginalia:
-            // Falls back to the shared `public` key so the provider works out of the box.
+            // Requires a key like the other keyed engines. The shared `public` key is almost
+            // always rate-limited (HTTP 429), so it is no longer used as a silent default; a
+            // user can still type `public` explicitly to try it.
             let key = config.marginaliaAPIKey.trimmingCharacters(in: .whitespaces)
-            return MarginaliaProvider(apiKey: key.isEmpty ? "public" : key)
+            return key.isEmpty ? nil : MarginaliaProvider(apiKey: key)
         case .brave:
             let key = config.braveAPIKey.trimmingCharacters(in: .whitespaces)
             return key.isEmpty ? nil : BraveProvider(apiKey: key)
@@ -692,8 +695,9 @@ struct TavilyProvider: WebSearchProvider {
 }
 
 /// Marginalia — an independent, non-commercial engine with its own index, strong on the
-/// text-heavy "small web" the big engines bury. The `public` key works out of the box
-/// (shared rate limit); a free personal key is available by email.
+/// text-heavy "small web" the big engines bury. Send the API key in the `API-Key` header.
+/// A free personal key is available by email; the shared `public` key is almost always
+/// rate-limited (HTTP 429), so it is only useful for occasional testing.
 struct MarginaliaProvider: WebSearchProvider {
     let apiKey: String
 

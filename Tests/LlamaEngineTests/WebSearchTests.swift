@@ -215,7 +215,7 @@ final class WebSearchTests: XCTestCase {
     func testIsReadyReflectsCredentials() {
         let empty = WebSearchConfig()
         XCTAssertTrue(WebSearch.isReady(.wikipedia, config: empty))  // keyless
-        XCTAssertTrue(WebSearch.isReady(.marginalia, config: empty)) // default "public" key
+        XCTAssertFalse(WebSearch.isReady(.marginalia, config: empty)) // needs a key like the other engines
         XCTAssertFalse(WebSearch.isReady(.exa, config: empty))
         XCTAssertFalse(WebSearch.isReady(.searxng, config: empty))
 
@@ -301,7 +301,7 @@ final class WebSearchTests: XCTestCase {
         config.braveAPIKey = "k"
         let providers = WebSearch.metaProviders(config: config)
         XCTAssertTrue(providers.contains(.wikipedia))  // keyless, always ready
-        XCTAssertTrue(providers.contains(.marginalia)) // shared public key
+        XCTAssertFalse(providers.contains(.marginalia)) // no key → not ready
         XCTAssertTrue(providers.contains(.brave))      // now keyed
         XCTAssertFalse(providers.contains(.exa))       // no key → not ready
         XCTAssertEqual(providers, WebSearch.catalog.filter { providers.contains($0) }) // catalog order
@@ -309,7 +309,7 @@ final class WebSearchTests: XCTestCase {
 
     func testMetaProvidersHonorEnabledSet() {
         var config = WebSearchConfig(enabledProviders: [.wikipedia])
-        // Marginalia is ready but not enabled, so it's excluded.
+        // Only Wikipedia is enabled, so it's the sole meta engine.
         XCTAssertEqual(WebSearch.metaProviders(config: config), [.wikipedia])
         XCTAssertTrue(WebSearch.isReady(.meta, config: config))
 
