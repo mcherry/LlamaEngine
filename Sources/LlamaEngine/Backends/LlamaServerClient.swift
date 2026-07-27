@@ -142,6 +142,7 @@ public struct LlamaServerClient: Sendable, ServerBackend {
                     var completionTokens: Int?
                     var evalNanos: Int?
                     var finishReason: String?
+                    var timings: TurnTimings?
                     var emittedDone = false
 
                     for try await line in bytes.lines {
@@ -151,12 +152,14 @@ public struct LlamaServerClient: Sendable, ServerBackend {
                         if let value = event.completionTokens { completionTokens = value }
                         if let value = event.evalDurationNanos { evalNanos = value }
                         if let value = event.finishReason { finishReason = value }
+                        if let value = event.timings { timings = value }
                         if event.isTerminator {
                             continuation.yield(ChatChunk(contentDelta: "", done: true,
                                                          promptTokens: promptTokens,
                                                          evalTokens: completionTokens,
                                                          evalDurationNanos: evalNanos,
-                                                         doneReason: finishReason))
+                                                         doneReason: finishReason,
+                                                         timings: timings))
                             emittedDone = true
                             break
                         }
@@ -174,7 +177,8 @@ public struct LlamaServerClient: Sendable, ServerBackend {
                                                      promptTokens: promptTokens,
                                                      evalTokens: completionTokens,
                                                      evalDurationNanos: evalNanos,
-                                                     doneReason: finishReason))
+                                                     doneReason: finishReason,
+                                                     timings: timings))
                     }
                     continuation.finish()
                 } catch {
@@ -270,6 +274,8 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         public var promptTokens: Int?
         public var completionTokens: Int?
         public var evalDurationNanos: Int?
+        /// The server's full `timings` block, when it sent one.
+        public var timings: TurnTimings?
         /// True for the `data: [DONE]` terminator line.
         public var isTerminator: Bool = false
     }
@@ -307,6 +313,16 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         event.completionTokens = chunk.usage?.completionTokens ?? chunk.timings?.predictedN
         if let ms = chunk.timings?.predictedMs {
             event.evalDurationNanos = Int(ms * 1_000_000)
+        }
+        if let timings = chunk.timings {
+            let mapped = TurnTimings(promptTokens: timings.promptN,
+                                     promptMilliseconds: timings.promptMs,
+                                     promptTokensPerSecond: timings.promptPerSecond,
+                                     predictedTokens: timings.predictedN,
+                                     predictedMilliseconds: timings.predictedMs,
+                                     predictedTokensPerSecond: timings.predictedPerSecond,
+                                     cachedTokens: timings.cacheN)
+            event.timings = mapped.isEmpty ? nil : mapped
         }
         return event
     }
@@ -441,8 +457,13 @@ struct CompletionChunk: Decodable {
 
     struct Timings: Decodable {
         let promptN: Int?
+        let promptMs: Double?
+        let promptPerSecond: Double?
         let predictedN: Int?
         let predictedMs: Double?
+        let predictedPerSecond: Double?
+        /// Prompt tokens reused from the KV cache. Only newer builds report it.
+        let cacheN: Int?
     }
 
     struct ErrorBody: Decodable {

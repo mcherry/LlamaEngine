@@ -392,6 +392,7 @@ public final class ConversationController {
                     assistant.promptTokens = chunk.promptTokens
                     assistant.evalTokens = chunk.evalTokens
                     assistant.evalDurationNanos = chunk.evalDurationNanos
+                    if let timings = chunk.timings { assistant.timings = timings }
                     // "length" means the model hit the context window mid-reply.
                     assistant.wasTruncated = (chunk.doneReason == "length")
                     // Calibrate the token estimator against the server's real count so
@@ -441,6 +442,7 @@ public final class ConversationController {
         var promptTokens: Int?
         var evalTokens: Int?
         var evalDurationNanos: Int?
+        var timings: TurnTimings?
         var roundContent: String = ""
     }
 
@@ -481,6 +483,8 @@ public final class ConversationController {
                 assistant.promptTokens = outcome.promptTokens
                 assistant.evalTokens = outcome.evalTokens
                 assistant.evalDurationNanos = outcome.evalDurationNanos
+                if let timings = outcome.timings { assistant.timings = timings }
+                assistant.toolRounds = round
                 assistant.wasTruncated = (outcome.doneReason == "length")
                 // Calibrate on the first round only — its prompt matches the estimate.
                 if round == 0, session.backend == .ollama || session.backend == .llamaServer,
@@ -609,6 +613,7 @@ public final class ConversationController {
                 outcome.promptTokens = chunk.promptTokens
                 outcome.evalTokens = chunk.evalTokens
                 outcome.evalDurationNanos = chunk.evalDurationNanos
+                outcome.timings = chunk.timings
             }
         }
         return outcome

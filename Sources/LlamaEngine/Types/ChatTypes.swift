@@ -184,6 +184,9 @@ public struct ChatChunk: Sendable {
     /// Raw streamed tool-call fragments (accumulated by `ToolCallAssembler`). Empty on a
     /// normal text chunk.
     public var toolCallDeltas: [ToolCallDelta] = []
+    /// Server-reported timings for the turn (llama.cpp's `timings` block), present only on
+    /// the terminal `done` chunk and only from backends that report them.
+    public var timings: TurnTimings? = nil
 
     public init(contentDelta: String,
                 done: Bool,
@@ -193,7 +196,8 @@ public struct ChatChunk: Sendable {
                 isReplacement: Bool = false,
                 thinkingDelta: String = "",
                 doneReason: String? = nil,
-                toolCallDeltas: [ToolCallDelta] = []) {
+                toolCallDeltas: [ToolCallDelta] = [],
+                timings: TurnTimings? = nil) {
         self.contentDelta = contentDelta
         self.done = done
         self.promptTokens = promptTokens
@@ -203,5 +207,6 @@ public struct ChatChunk: Sendable {
         self.thinkingDelta = thinkingDelta
         self.doneReason = doneReason
         self.toolCallDeltas = toolCallDeltas
+        self.timings = timings
     }
 }

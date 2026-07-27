@@ -53,6 +53,11 @@ public final class ChatMessage {
     /// Encoded `ImageGenInfo` (prompt + parameters) for a generated image, for the turn
     /// inspector and "Regenerate". `nil` for text replies and user turns.
     public var imageGenData: Data?
+    /// Encoded `TurnTimings` — the server's own prefill/decode numbers and cache reuse for
+    /// this turn. `nil` for backends that don't report them.
+    public var timingsData: Data?
+    /// How many tool rounds this turn took. 0 when no tools were involved.
+    public var toolRounds: Int = 0
 
     /// Inverse side of `ChatSession.messages`.
     public var session: ChatSession?
@@ -92,11 +97,17 @@ public final class ChatMessage {
         set { imageGenData = newValue.flatMap { try? JSONEncoder().encode($0) } }
     }
 
+    /// Typed view over `timingsData`.
+    public var timings: TurnTimings? {
+        get { timingsData.flatMap { try? JSONDecoder().decode(TurnTimings.self, from: $0) } }
+        set { timingsData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
     /// Whether this message has any inspector data to show.
     public var hasInspectorData: Bool {
         requestPayload != nil || !retrievedChunks.isEmpty || firstTokenSeconds != nil
             || historyNote != nil || visionNote != nil || imageGenData != nil
-            || !toolCallRecords.isEmpty
+            || !toolCallRecords.isEmpty || timingsData != nil
     }
 
     /// Tool-call audit records for this turn, oldest first.

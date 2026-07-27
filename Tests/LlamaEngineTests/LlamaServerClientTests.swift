@@ -37,6 +37,58 @@ final class LlamaServerClientTests: XCTestCase {
         XCTAssertEqual(event.evalDurationNanos, 2_000_000_000)   // 2000 ms -> nanos
     }
 
+    // MARK: - Turn timings
+
+    func testParseFullTimingsBlock() throws {
+        let line = #"data: {"choices":[],"timings":{"prompt_n":120,"prompt_ms":40.0,"prompt_per_second":3000.0,"predicted_n":64,"predicted_ms":410.0,"predicted_per_second":156.1,"cache_n":41000}}"#
+        let timings = try XCTUnwrap(try XCTUnwrap(LlamaServerClient.parseSSELine(line)).timings)
+        XCTAssertEqual(timings.promptTokens, 120)
+        XCTAssertEqual(timings.promptMilliseconds, 40.0)
+        XCTAssertEqual(timings.promptTokensPerSecond, 3000.0)
+        XCTAssertEqual(timings.predictedTokens, 64)
+        XCTAssertEqual(timings.predictedMilliseconds, 410.0)
+        XCTAssertEqual(timings.predictedTokensPerSecond, 156.1)
+        XCTAssertEqual(timings.cachedTokens, 41_000)
+    }
+
+    func testTimingsAreAbsentWhenTheServerSendsNone() throws {
+        let line = #"data: {"choices":[{"delta":{"content":"hi"},"index":0}]}"#
+        XCTAssertNil(try XCTUnwrap(LlamaServerClient.parseSSELine(line)).timings)
+    }
+
+    func testPartialTimingsBlockKeepsWhatItHas() throws {
+        // Older builds omit per-second and cache figures entirely.
+        let line = #"data: {"choices":[],"timings":{"prompt_n":10,"predicted_n":5}}"#
+        let timings = try XCTUnwrap(try XCTUnwrap(LlamaServerClient.parseSSELine(line)).timings)
+        XCTAssertEqual(timings.promptTokens, 10)
+        XCTAssertNil(timings.promptTokensPerSecond)
+        XCTAssertNil(timings.cachedTokens)
+    }
+
+    func testCacheHitRateCountsReusedAgainstTheWholePrompt() {
+        // 900 of 1000 prompt tokens came from the KV cache.
+        let timings = TurnTimings(promptTokens: 100, cachedTokens: 900)
+        XCTAssertEqual(timings.totalPromptTokens, 1_000)
+        XCTAssertEqual(try XCTUnwrap(timings.cacheHitRate), 0.9, accuracy: 0.0001)
+    }
+
+    func testCacheHitRateIsUnknownWithoutACacheFigure() {
+        XCTAssertNil(TurnTimings(promptTokens: 100).cacheHitRate)
+    }
+
+    func testEmptyTimingsAreReportedAsEmpty() {
+        XCTAssertTrue(TurnTimings().isEmpty)
+        XCTAssertFalse(TurnTimings(predictedTokens: 1).isEmpty)
+    }
+
+    func testTimingsSurviveARoundTrip() throws {
+        let original = TurnTimings(promptTokens: 1, promptMilliseconds: 2, promptTokensPerSecond: 3,
+                                   predictedTokens: 4, predictedMilliseconds: 5,
+                                   predictedTokensPerSecond: 6, cachedTokens: 7)
+        let decoded = try JSONDecoder().decode(TurnTimings.self, from: JSONEncoder().encode(original))
+        XCTAssertEqual(decoded, original)
+    }
+
     func testParseDoneTerminator() throws {
         let event = try XCTUnwrap(LlamaServerClient.parseSSELine("data: [DONE]"))
         XCTAssertTrue(event.isTerminator)
