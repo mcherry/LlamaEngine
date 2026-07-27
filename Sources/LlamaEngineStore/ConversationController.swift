@@ -455,12 +455,15 @@ public final class ConversationController {
     /// reporting success having done nothing.
     private func resolveCalls(from outcome: RoundOutcome,
                               into assistant: ChatMessage,
-                              allowTools: Bool) -> [ToolCall] {
+                              allowTools: Bool,
+                              knownTools: Set<String>) -> [ToolCall] {
         let calls = ToolCallAssembler.assemble(outcome.toolCallDeltas)
         guard calls.isEmpty, allowTools,
               TextualToolCall.looksLikeMarkup(outcome.roundContent) else { return calls }
 
-        let recovered = TextualToolCall.parse(outcome.roundContent)
+        // Names are checked against the real registry, so prose that merely mentions a tool
+        // can't be executed as one.
+        let recovered = TextualToolCall.parse(outcome.roundContent, knownTools: knownTools)
         guard !recovered.isEmpty else { return calls }
 
         assistant.recoveredToolCalls += recovered.count
@@ -519,7 +522,8 @@ public final class ConversationController {
                                            rawEstimate: rawPromptEstimate, actualTokens: actual)
                 }
 
-                let calls = resolveCalls(from: outcome, into: assistant, allowTools: allowTools)
+                let calls = resolveCalls(from: outcome, into: assistant, allowTools: allowTools,
+                                         knownTools: Set(registry.tools.map(\.name)))
                 if calls.isEmpty || !allowTools { break }   // final answer, or tools exhausted
 
                 round += 1

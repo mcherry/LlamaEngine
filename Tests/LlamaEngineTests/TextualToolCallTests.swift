@@ -159,4 +159,71 @@ final class TextualToolCallTests: XCTestCase {
         let content = #"Reading it.\#n<tool_call>{"name": "read_file"}</tool_call>"#
         XCTAssertEqual(TextualToolCall.stripped(content), "Reading it.")
     }
+
+    // MARK: - Other families
+
+    func testMistralToolCallsMarker() {
+        let content = #"[TOOL_CALLS] [{"name": "read_file", "arguments": {"path": "a.swift"}}]"#
+        let call = TextualToolCall.parse(content).first
+        XCTAssertEqual(call?.name, "read_file")
+        XCTAssertEqual(call?.arguments.string("path"), "a.swift")
+    }
+
+    func testLlamaPythonTagMarker() {
+        let content = #"<|python_tag|>{"name": "list_dir", "arguments": {"path": "."}}"#
+        XCTAssertEqual(TextualToolCall.parse(content).first?.name, "list_dir")
+    }
+
+    func testFunctionCallTagIsTreatedLikeToolCall() {
+        let content = #"<function_call>{"name": "list_dir"}</function_call>"#
+        XCTAssertEqual(TextualToolCall.parse(content).first?.name, "list_dir")
+    }
+
+    func testAWholeMessageThatIsJustACallIsRecovered() {
+        let content = #"{"name": "read_file", "arguments": {"path": "a.swift"}}"#
+        XCTAssertEqual(TextualToolCall.parse(content).first?.name, "read_file")
+    }
+
+    func testAWholeMessageThatIsAnArrayOfCallsIsRecovered() {
+        let content = #"[{"name": "read_file"}, {"name": "list_dir"}]"#
+        XCTAssertEqual(TextualToolCall.parse(content).map(\.name), ["read_file", "list_dir"])
+    }
+
+    func testArgumentsSentAsAJSONStringAreDecoded() {
+        let content = #"<tool_call>{"name": "read_file", "arguments": "{\"path\": \"a.swift\"}"}</tool_call>"#
+        XCTAssertEqual(TextualToolCall.parse(content).first?.arguments.string("path"), "a.swift")
+    }
+
+    // MARK: - False positives
+
+    func testProseMentioningJSONIsNotExecuted() {
+        // The dangerous case: text *about* a call must never become one.
+        let content = #"You could call {"name": "read_file"} but I'd rather explain first."#
+        XCTAssertTrue(TextualToolCall.parse(content).isEmpty)
+    }
+
+    func testACodeBlockContainingACallShapeIsNotExecuted() {
+        let content = "Here's the shape:\n```json\n{\"name\": \"read_file\"}\n```"
+        XCTAssertTrue(TextualToolCall.parse(content).isEmpty)
+    }
+
+    func testUnknownToolNamesAreDiscarded() {
+        let content = #"<tool_call>{"name": "rm_rf_everything"}</tool_call>"#
+        XCTAssertTrue(TextualToolCall.parse(content, knownTools: ["read_file"]).isEmpty)
+    }
+
+    func testKnownToolNamesSurviveTheFilter() {
+        let content = #"<tool_call>{"name": "read_file"}</tool_call>"#
+        XCTAssertEqual(TextualToolCall.parse(content, knownTools: ["read_file"]).count, 1)
+    }
+
+    func testOnlyTheKnownCallsAreKeptFromAMixedBatch() {
+        let content = #"[{"name": "read_file"}, {"name": "made_up"}]"#
+        XCTAssertEqual(TextualToolCall.parse(content, knownTools: ["read_file"]).map(\.name),
+                       ["read_file"])
+    }
+
+    func testOrdinaryJSONWithoutANameIsNotACall() {
+        XCTAssertTrue(TextualToolCall.parse(#"{"path": "a.swift"}"#).isEmpty)
+    }
 }
