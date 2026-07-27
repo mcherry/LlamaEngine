@@ -446,6 +446,32 @@ public final class ConversationController {
         var roundContent: String = ""
     }
 
+    /// The round's tool calls, recovering any the model wrote as *text*.
+    ///
+    /// A zero-call turn is not proof the model is finished. In a measured ~9% of runs it
+    /// emits `<function=name><parameter=k>v</parameter></function>` as content and the
+    /// server's template parser fails to convert it, so the turn arrives with
+    /// `finish_reason: "stop"` and no `tool_calls`. Treating that as completion means
+    /// reporting success having done nothing.
+    private func resolveCalls(from outcome: RoundOutcome,
+                              into assistant: ChatMessage,
+                              allowTools: Bool) -> [ToolCall] {
+        let calls = ToolCallAssembler.assemble(outcome.toolCallDeltas)
+        guard calls.isEmpty, allowTools,
+              TextualToolCall.looksLikeMarkup(outcome.roundContent) else { return calls }
+
+        let recovered = TextualToolCall.parse(outcome.roundContent)
+        guard !recovered.isEmpty else { return calls }
+
+        assistant.recoveredToolCalls += recovered.count
+        // Take the raw markup out of what the user sees; it was never meant to be prose.
+        let visible = TextualToolCall.stripped(outcome.roundContent)
+        if assistant.content.hasSuffix(outcome.roundContent) {
+            assistant.content = String(assistant.content.dropLast(outcome.roundContent.count)) + visible
+        }
+        return recovered
+    }
+
     /// The bounded tool-calling loop: stream a round, and if the model proposed tool calls,
     /// run them locally, feed the results back as `role:"tool"` turns, and stream again —
     /// up to `registry.maxIterations` rounds, then one final round with tools withdrawn so
@@ -493,7 +519,7 @@ public final class ConversationController {
                                            rawEstimate: rawPromptEstimate, actualTokens: actual)
                 }
 
-                let calls = ToolCallAssembler.assemble(outcome.toolCallDeltas)
+                let calls = resolveCalls(from: outcome, into: assistant, allowTools: allowTools)
                 if calls.isEmpty || !allowTools { break }   // final answer, or tools exhausted
 
                 round += 1

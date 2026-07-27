@@ -58,6 +58,10 @@ public final class ChatMessage {
     public var timingsData: Data?
     /// How many tool rounds this turn took. 0 when no tools were involved.
     public var toolRounds: Int = 0
+    /// How many tool calls had to be recovered from markup the server's template parser
+    /// failed to convert. Non-zero means the model is emitting calls as text — invisible
+    /// otherwise, and it would present as the agent silently doing nothing.
+    public var recoveredToolCalls: Int = 0
 
     /// Inverse side of `ChatSession.messages`.
     public var session: ChatSession?
