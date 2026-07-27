@@ -109,4 +109,54 @@ final class TextualToolCallTests: XCTestCase {
         XCTAssertTrue(TextualToolCall.parse("<function=").isEmpty)
         XCTAssertTrue(TextualToolCall.parse("<function=>").isEmpty)
     }
+
+    // MARK: - Qwen's <tool_call> envelope
+
+    func testRecoversAToolCallEnvelope() {
+        let content = #"<tool_call>{"name": "read_file", "arguments": {"path": "a.swift"}}</tool_call>"#
+        let call = TextualToolCall.parse(content).first
+        XCTAssertEqual(call?.name, "read_file")
+        XCTAssertEqual(call?.arguments.string("path"), "a.swift")
+    }
+
+    func testAcceptsParametersAsTheArgumentKey() {
+        // Some chat templates spell it "parameters".
+        let content = #"<tool_call>{"name": "list_dir", "parameters": {"path": "."}}</tool_call>"#
+        XCTAssertEqual(TextualToolCall.parse(content).first?.arguments.string("path"), ".")
+    }
+
+    func testAToolCallWithNoArgumentsIsRecovered() {
+        let content = #"<tool_call>{"name": "list_dir"}</tool_call>"#
+        XCTAssertEqual(TextualToolCall.parse(content).first?.arguments, .object([:]))
+    }
+
+    func testRecoversSeveralToolCallEnvelopes() {
+        let content = """
+        <tool_call>{"name": "read_file", "arguments": {"path": "a.swift"}}</tool_call>
+        <tool_call>{"name": "read_file", "arguments": {"path": "b.swift"}}</tool_call>
+        """
+        XCTAssertEqual(TextualToolCall.parse(content).map { $0.arguments.string("path") },
+                       ["a.swift", "b.swift"])
+    }
+
+    func testBothMarkupStylesAreRecoveredInDocumentOrder() {
+        let content = """
+        <tool_call>{"name": "first"}</tool_call>
+        <function=second></function>
+        """
+        XCTAssertEqual(TextualToolCall.parse(content).map(\.name), ["first", "second"])
+    }
+
+    func testAnEnvelopeWithNoNameIsIgnored() {
+        XCTAssertTrue(TextualToolCall.parse(#"<tool_call>{"arguments":{}}</tool_call>"#).isEmpty)
+    }
+
+    func testMalformedEnvelopeJSONIsIgnored() {
+        XCTAssertTrue(TextualToolCall.parse("<tool_call>not json</tool_call>").isEmpty)
+    }
+
+    func testToolCallMarkupIsRemovedFromWhatTheUserSees() {
+        let content = #"Reading it.\#n<tool_call>{"name": "read_file"}</tool_call>"#
+        XCTAssertEqual(TextualToolCall.stripped(content), "Reading it.")
+    }
 }

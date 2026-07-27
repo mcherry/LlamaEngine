@@ -18,7 +18,7 @@ public enum TextualToolCall {
     /// Whether `content` contains markup worth trying to recover. Cheap enough to run on
     /// every zero-call turn.
     public static func looksLikeMarkup(_ content: String) -> Bool {
-        content.contains("<function=")
+        content.contains("<function=") || content.contains("<tool_call>")
     }
 
     /// Tool calls recovered from `content`, in the order they appear. Empty when there's
@@ -28,10 +28,16 @@ public enum TextualToolCall {
 
         var calls: [ToolCall] = []
         for block in blocks(in: content) {
-            guard !block.name.isEmpty else { continue }
-            calls.append(ToolCall(id: "recovered-\(calls.count)",
-                                  name: block.name,
-                                  arguments: arguments(from: block.body)))
+            switch block.style {
+            case .function:
+                guard !block.name.isEmpty else { continue }
+                calls.append(ToolCall(id: "recovered-\(calls.count)",
+                                      name: block.name,
+                                      arguments: arguments(from: block.body)))
+            case .toolCall:
+                guard let call = toolCallEnvelope(block.body, index: calls.count) else { continue }
+                calls.append(call)
+            }
         }
         return calls
     }
@@ -50,15 +56,24 @@ public enum TextualToolCall {
     // MARK: - Scanning
 
     private struct Block {
+        enum Style { case function, toolCall }
+        let style: Style
         let name: String
         let body: String
         let range: Range<String.Index>
     }
 
-    /// Finds each `<function=name> … </function>` region. An unterminated block still
-    /// counts — the model ran out of tokens mid-call, and the arguments it did emit are
-    /// usually complete.
+    /// Finds each recoverable region, in document order. Two shapes appear in practice:
+    /// `<function=name> … </function>` and Qwen's `<tool_call>{json}</tool_call>`.
+    ///
+    /// An unterminated block still counts — the model ran out of tokens mid-call, and the
+    /// arguments it did emit are usually complete.
     private static func blocks(in content: String) -> [Block] {
+        (functionBlocks(in: content) + toolCallBlocks(in: content))
+            .sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    private static func functionBlocks(in content: String) -> [Block] {
         var blocks: [Block] = []
         var searchStart = content.startIndex
 
@@ -74,11 +89,45 @@ public enum TextualToolCall {
             let body = String(content[nameEnd.upperBound..<bodyEnd])
             let blockEnd = close?.upperBound ?? content.endIndex
 
-            blocks.append(Block(name: name, body: body, range: open.lowerBound..<blockEnd))
+            blocks.append(Block(style: .function, name: name, body: body,
+                                range: open.lowerBound..<blockEnd))
             searchStart = blockEnd
             if searchStart >= content.endIndex { break }
         }
         return blocks
+    }
+
+    private static func toolCallBlocks(in content: String) -> [Block] {
+        var blocks: [Block] = []
+        var searchStart = content.startIndex
+
+        while let open = content.range(of: "<tool_call>", range: searchStart..<content.endIndex) {
+            let close = content.range(of: "</tool_call>", range: open.upperBound..<content.endIndex)
+            let bodyEnd = close?.lowerBound ?? content.endIndex
+            let body = String(content[open.upperBound..<bodyEnd])
+            let blockEnd = close?.upperBound ?? content.endIndex
+
+            blocks.append(Block(style: .toolCall, name: "", body: body,
+                                range: open.lowerBound..<blockEnd))
+            searchStart = blockEnd
+            if searchStart >= content.endIndex { break }
+        }
+        return blocks
+    }
+
+    /// `{"name": "read_file", "arguments": {…}}` — the payload inside a `<tool_call>` tag.
+    /// Some templates spell the second key `parameters`.
+    private static func toolCallEnvelope(_ body: String, index: Int) -> ToolCall? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(JSONValue.self, from: data),
+              case let .object(fields) = decoded,
+              case let .string(name)? = fields["name"], !name.isEmpty else { return nil }
+
+        let arguments = fields["arguments"] ?? fields["parameters"] ?? .object([:])
+        return ToolCall(id: "recovered-\(index)",
+                        name: name,
+                        arguments: arguments.objectValue == nil ? .object([:]) : arguments)
     }
 
     // MARK: - Arguments
