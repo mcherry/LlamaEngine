@@ -223,6 +223,82 @@ final class ToolLoopTests: XCTestCase {
         let record = try XCTUnwrap(assistant.orderedToolCallRecords.first)
         XCTAssertEqual(record.decision, "denied")
     }
+
+    // MARK: - Remembered approvals go through the policy
+
+    func testSessionApprovalStillConfirmsEveryMutatingCall() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .mutating)
+        let spy = ConfirmSpy(.denied)
+        // A restored or tampered approval must not let a write run unasked.
+        await runRound(calling: tool, times: 1,
+                       settings: SessionToolSettings(enabled: true, allowedTools: ["stub_tool"],
+                                                     approvedForSession: ["stub_tool"]),
+                       spy: spy, context: context, session: session, assistant: assistant)
+
+        XCTAssertEqual(spy.count, 1)
+        XCTAssertFalse(tool.executed)
+        XCTAssertEqual(assistant.orderedToolCallRecords.first?.decision, "denied")
+    }
+
+    func testSessionApprovalDoesNotBypassTheAllowList() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .network)
+        let spy = ConfirmSpy(.approvedOnce)
+        await runRound(calling: tool, times: 1,
+                       settings: SessionToolSettings(enabled: true, allowedTools: [],
+                                                     approvedForSession: ["stub_tool"]),
+                       spy: spy, context: context, session: session, assistant: assistant)
+
+        XCTAssertEqual(spy.count, 0)
+        XCTAssertFalse(tool.executed)
+        XCTAssertEqual(assistant.orderedToolCallRecords.first?.decision, "denied")
+    }
+
+    func testApproveForChatCoversRepeatCallsWithinTheTurn() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .network)
+        let spy = ConfirmSpy(.approvedForSession)
+        await runRound(calling: tool, times: 2,
+                       settings: SessionToolSettings(enabled: true, allowedTools: ["stub_tool"]),
+                       spy: spy, context: context, session: session, assistant: assistant)
+
+        XCTAssertEqual(spy.count, 1)
+        XCTAssertTrue(tool.executed)
+        XCTAssertEqual(assistant.toolCallRecords.map(\.decision).sorted(), ["approved", "confirmed"])
+    }
+
+    func testMutatingToolIsReconfirmedForEveryCallWithinTheTurn() async throws {
+        let (context, session, assistant) = try fixture()
+        let tool = RecordingTool(tier: .mutating)
+        // Even a host that wrongly answers "approve for chat" can't silence the next write.
+        let spy = ConfirmSpy(.approvedForSession)
+        await runRound(calling: tool, times: 2,
+                       settings: SessionToolSettings(enabled: true, allowedTools: ["stub_tool"]),
+                       spy: spy, context: context, session: session, assistant: assistant)
+
+        XCTAssertEqual(spy.count, 2)
+        XCTAssertEqual(assistant.toolCallRecords.map(\.decision), ["confirmed", "confirmed"])
+    }
+
+    /// One round in which the model calls `tool` `times` times, then a plain answer.
+    private func runRound(calling tool: RecordingTool, times: Int, settings: SessionToolSettings,
+                          spy: ConfirmSpy, context: ModelContext, session: ChatSession,
+                          assistant: ChatMessage) async {
+        let deltas = (0..<times).map {
+            ToolCallDelta(index: $0, id: "c\($0)", name: tool.name, argumentsFragment: "{}")
+        }
+        let backend = StubToolBackend([
+            [ChatChunk(contentDelta: "", done: true, toolCallDeltas: deltas)],
+            [ChatChunk(contentDelta: "Done.", done: true)]
+        ])
+        let base = ChatRequest(model: "qwen", messages: [ChatTurn(role: "user", content: "go")], contextSize: 4096)
+        let toolContext = ToolContext(registry: ToolRegistry(tools: [tool]), settings: settings, confirm: spy.handler)
+
+        await ConversationController().runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
+                                                   context: toolContext, into: assistant, session: session,
+                                                   rawPromptEstimate: 0, modelContext: context)
+    }
 }
 
 /// A stub tool with a configurable risk tier that records whether it actually executed.

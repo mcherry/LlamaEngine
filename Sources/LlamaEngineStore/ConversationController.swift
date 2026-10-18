@@ -492,9 +492,8 @@ public final class ConversationController {
         let registry = context.registry
         var toolTurns: [ChatTurn] = []
         var round = 0
-        // Approvals granted during this turn (seeded from the session's remembered set) so a
-        // repeated call to the same tool within one turn does not re-prompt.
-        var turnApprovals = context.settings.approvedForSession
+        // Only ever read through the policy, so a remembered approval can't skip the allow-list or a write's re-ask.
+        var turnSettings = context.settings
         defer { activityStatus = nil }
         do {
             while true {
@@ -542,29 +541,25 @@ public final class ConversationController {
                     if let tool = registry.tool(named: call.name) {
                         do {
                             try tool.validate(call.arguments)
-                            if turnApprovals.contains(tool.name) {
-                                runLabel = "approved"
-                            } else {
-                                switch context.policy.decide(tool: tool, settings: context.settings) {
-                                case .allow:
-                                    runLabel = tool.riskTier == .pure ? "auto" : "approved"
-                                case .deny(let reason):
-                                    blocked = (.failure(reason), "denied")
-                                case .needsConfirmation:
-                                    let confirmRequest = ToolConfirmationRequest(
-                                        toolName: tool.name,
-                                        toolDescription: tool.description,
-                                        riskTier: tool.riskTier,
-                                        arguments: call.arguments)
-                                    switch await context.confirm?(confirmRequest) ?? .denied {
-                                    case .approvedForSession:
-                                        turnApprovals.insert(tool.name)
-                                        runLabel = "confirmed"
-                                    case .approvedOnce:
-                                        runLabel = "confirmed"
-                                    case .denied:
-                                        blocked = (.failure("The user declined to run \(tool.name)."), "denied")
-                                    }
+                            switch context.policy.decide(tool: tool, settings: turnSettings) {
+                            case .allow:
+                                runLabel = tool.riskTier == .pure ? "auto" : "approved"
+                            case .deny(let reason):
+                                blocked = (.failure(reason), "denied")
+                            case .needsConfirmation:
+                                let confirmRequest = ToolConfirmationRequest(
+                                    toolName: tool.name,
+                                    toolDescription: tool.description,
+                                    riskTier: tool.riskTier,
+                                    arguments: call.arguments)
+                                switch await context.confirm?(confirmRequest) ?? .denied {
+                                case .approvedForSession:
+                                    turnSettings.approvedForSession.insert(tool.name)
+                                    runLabel = "confirmed"
+                                case .approvedOnce:
+                                    runLabel = "confirmed"
+                                case .denied:
+                                    blocked = (.failure("The user declined to run \(tool.name)."), "denied")
                                 }
                             }
                         } catch {
@@ -618,8 +613,8 @@ public final class ConversationController {
     }
 
     /// Streams one round into `assistant`, accumulating content/reasoning and collecting the
-    /// round's tool-call fragments + final stats. Content appends (server backends); Apple's
-    /// replacement semantics don't apply here (Apple tool calling is a later phase).
+    /// round's tool-call fragments + final stats. Content appends (server backends); Apple
+    /// tool turns stream cumulative snapshots through `runAppleToolSession` instead.
     private func streamRound(_ stream: AsyncThrowingStream<ChatChunk, Error>,
                              into assistant: ChatMessage,
                              firstRound: Bool,

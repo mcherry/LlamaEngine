@@ -1,9 +1,9 @@
 import Foundation
 
-/// Fetches a single web page for context, hardened for a manual, user-triggered flow:
-/// http/https only, a real User-Agent, a timeout, a content-type check, and a size cap.
-/// There is no crawling and no model-initiated fetch — the user pastes a URL, so there's
-/// no exfiltration channel (see WEB_CONTENT_PLAN.md). Returns the raw HTML for
+/// Fetches a single web page: http/https only, a real User-Agent, a timeout, a content-type
+/// check, and a size cap; no crawling. Reached through `WebAccess` from the add-a-page flow,
+/// search results, and the model's `fetch_url` tool — model-initiated, so a URL can carry
+/// data out, which is why that tool is confirmation-gated. Returns the raw HTML for
 /// `HTMLExtractor`; throws a descriptive error (including block/paywall signals) on failure.
 enum WebFetcher {
 

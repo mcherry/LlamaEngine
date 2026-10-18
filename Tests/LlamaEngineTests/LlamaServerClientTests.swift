@@ -178,6 +178,86 @@ final class LlamaServerClientTests: XCTestCase {
         XCTAssertEqual(messages[0]["role"] as? String, "user")
     }
 
+    // MARK: - System message collapsing
+    //
+    // Qwen 3.x templates raise "System message must be at the beginning." on any system
+    // message past index 0, so every system turn has to reach the wire merged into one.
+
+    private func encodedRoles(_ request: ChatRequest) throws -> [[String: Any]] {
+        let data = try LlamaServerClient.encodeChatBody(request)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try XCTUnwrap(object["messages"] as? [[String: Any]])
+    }
+
+    func testEncodeChatBodyMergesMultipleSystemMessagesIntoOne() throws {
+        // buildTurns emits a session prompt plus a reference-material block when web
+        // search or attachment context is present.
+        let messages = try encodedRoles(ChatRequest(
+            model: "m",
+            messages: [
+                ChatTurn(role: "system", content: "You are helpful."),
+                ChatTurn(role: "system", content: "<reference_material>Sikorsky</reference_material>"),
+                ChatTurn(role: "user", content: "Who makes the Blackhawk?")
+            ],
+            contextSize: 4096))
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["role"] as? String, "system")
+        XCTAssertEqual(messages[0]["content"] as? String,
+                       "You are helpful.\n\n<reference_material>Sikorsky</reference_material>")
+        XCTAssertEqual(messages[1]["role"] as? String, "user")
+    }
+
+    func testEncodeChatBodyMergesReasoningEffortIntoAnExistingSystemPrompt() throws {
+        // ContextAssembler's summarization pass sends its own system prompt with
+        // think: false, which used to produce two system messages.
+        let messages = try encodedRoles(ChatRequest(
+            model: "m",
+            messages: [
+                ChatTurn(role: "system", content: "You compress documents."),
+                ChatTurn(role: "user", content: "Summarize this.")
+            ],
+            contextSize: 4096,
+            think: false))
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["content"] as? String, "Reasoning: low\n\nYou compress documents.")
+        XCTAssertEqual(messages[1]["role"] as? String, "user")
+    }
+
+    func testEncodeChatBodyHoistsASystemMessageThatFollowsConversationTurns() throws {
+        // Rolling-summary mode prepends a system turn to the history, landing it after
+        // earlier turns. Non-system turns keep their relative order.
+        let messages = try encodedRoles(ChatRequest(
+            model: "m",
+            messages: [
+                ChatTurn(role: "user", content: "First"),
+                ChatTurn(role: "assistant", content: "Reply"),
+                ChatTurn(role: "system", content: "Summary of earlier conversation"),
+                ChatTurn(role: "user", content: "Second")
+            ],
+            contextSize: 4096))
+
+        XCTAssertEqual(messages.map { $0["role"] as? String },
+                       ["system", "user", "assistant", "user"])
+        XCTAssertEqual(messages[0]["content"] as? String, "Summary of earlier conversation")
+        XCTAssertEqual(messages[3]["content"] as? String, "Second")
+    }
+
+    func testEncodeChatBodyDropsEmptySystemTurnsRatherThanPaddingSeparators() throws {
+        let messages = try encodedRoles(ChatRequest(
+            model: "m",
+            messages: [
+                ChatTurn(role: "system", content: "   "),
+                ChatTurn(role: "system", content: "Real instruction."),
+                ChatTurn(role: "user", content: "Hi")
+            ],
+            contextSize: 4096))
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["content"] as? String, "Real instruction.")
+    }
+
     // MARK: - Models parsing
 
     func testParseModelsFromDataArray() throws {

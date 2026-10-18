@@ -12,8 +12,8 @@ public struct SessionToolSettings: Sendable, Equatable {
     /// Tools the user chose "Approve for this chat" in a prior confirmation, so a
     /// higher-risk tool does not re-prompt on every call. The host persists this.
     public var approvedForSession: Set<String>
-    /// Whether `readLocal`-tier tools require confirmation (default true). `network` and
-    /// `mutating` always confirm regardless; `pure` never does.
+    /// Whether `readLocal`-tier tools require confirmation (default true). `network` always
+    /// confirms unless approved for the chat, `mutating` confirms every call, `pure` never does.
     public var confirmReadLocal: Bool
 
     public init(enabled: Bool = false,
@@ -45,6 +45,10 @@ public struct ToolPolicy: Sendable {
         guard settings.allowedTools.contains(tool.name) else {
             return .deny(reason: "\(tool.name) is not enabled for this chat.")
         }
+        // Ordered before the session-approval bypass on purpose: `mutating` must re-ask
+        // every single time, so a stale, restored, or tampered `approvedForSession` entry
+        // can never grant a write silently.
+        if tool.riskTier == .mutating { return .needsConfirmation }
         if settings.approvedForSession.contains(tool.name) { return .allow }
         switch tool.riskTier {
         case .pure:      return .allow

@@ -2,8 +2,7 @@ import XCTest
 import LlamaEngine
 @testable import LlamaEngineStore
 
-/// Tests for `HistoryMode` and its `ChatSession` default. These stay in Llamatron
-/// until the model enums + SwiftData store move into LlamaEngine in a later phase.
+/// Tests for `HistoryMode` and its `ChatSession` default.
 final class HistoryModeTests: XCTestCase {
 
     func testHistoryModeNeedsServer() {

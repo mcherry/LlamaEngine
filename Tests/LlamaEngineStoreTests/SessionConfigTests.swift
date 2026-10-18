@@ -71,4 +71,43 @@ final class SessionConfigTests: XCTestCase {
         XCTAssertEqual(dest.modelName, "keep-me")
         XCTAssertEqual(dest.temperature, 0.9)
     }
+
+    func testToolSettingsCarryOverButApprovalsDoNot() {
+        let source = ChatSession()
+        source.toolsEnabled = true
+        source.allowedToolNames = ["current_datetime", "fetch_url"]
+        source.approvedToolNames = ["fetch_url"]
+
+        let dest = ChatSession()
+        dest.apply(source.configSnapshot())
+
+        XCTAssertTrue(dest.toolsEnabled)
+        XCTAssertEqual(dest.allowedToolNames, ["current_datetime", "fetch_url"])
+        XCTAssertTrue(dest.approvedToolNames.isEmpty)
+    }
+
+    func testApplyingAnAllowListRevokesApprovalsOutsideIt() {
+        let dest = ChatSession()
+        dest.allowedToolNames = ["fetch_url", "web_search"]
+        dest.approvedToolNames = ["fetch_url", "web_search"]
+        var config = SessionConfig()
+        config.allowedToolNames = ["web_search"]
+
+        dest.apply(config)
+
+        XCTAssertEqual(dest.approvedToolNames, ["web_search"])
+    }
+
+    func testPresetWithoutToolKeysLeavesToolSettingsAlone() throws {
+        let json = #"{"id":"abc","name":"Old","config":{"modelName":"llama3"}}"#
+        let preset = try JSONDecoder().decode(SessionPreset.self, from: Data(json.utf8))
+        let dest = ChatSession()
+        dest.toolsEnabled = true
+        dest.allowedToolNames = ["current_datetime"]
+
+        dest.apply(preset.config)
+
+        XCTAssertTrue(dest.toolsEnabled)
+        XCTAssertEqual(dest.allowedToolNames, ["current_datetime"])
+    }
 }

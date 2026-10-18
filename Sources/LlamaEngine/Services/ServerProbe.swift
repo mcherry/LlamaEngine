@@ -1,8 +1,8 @@
 import Foundation
 
 /// Minimal, dependency-free reachability check for the Ollama server, used by the
-/// first-run setup and Settings. The full networking layer (`OllamaClient`) arrives
-/// in a later phase; this only needs to confirm the server answers.
+/// first-run setup and Settings. Separate from `OllamaClient` because it only needs to
+/// confirm the server answers.
 public enum ServerProbe {
     public enum Outcome: Sendable {
         case success(version: String)

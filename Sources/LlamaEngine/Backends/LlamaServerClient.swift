@@ -224,12 +224,39 @@ public struct LlamaServerClient: Sendable, ServerBackend {
         }
     }
 
+    /// Merges every system turn into a single leading one, preserving their relative order.
+    ///
+    /// llama.cpp renders the model's own chat template, and some templates (Qwen 3.x among
+    /// them) accept a system message only at index 0 and `raise_exception` on any that
+    /// follow. The engine legitimately produces several — session prompt, diagram guidance,
+    /// reference material, image description, rolling summary — which those models reject.
+    /// Merging rather than dropping keeps every instruction, and keeps the leading bytes
+    /// stable across turns so the server can still reuse its cached prompt prefix.
+    public static func collapsingSystemTurns(_ turns: [ChatTurn]) -> [ChatTurn] {
+        let systems = turns.filter { $0.role == Role.system.rawValue }
+        let alreadyValid = systems.isEmpty
+            || (systems.count == 1 && turns.first?.role == Role.system.rawValue)
+        guard !alreadyValid else { return turns }
+
+        let content = systems
+            .map(\.content)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n")
+        let rest = turns.filter { $0.role != Role.system.rawValue }
+        guard !content.isEmpty else { return rest }
+        return [ChatTurn(role: Role.system.rawValue, content: content)] + rest
+    }
+
     /// Encodes a chat request into its OpenAI-compatible JSON wire body. Always streams
     /// (`stream: true` + `include_usage`) so a single code path handles both live chat
     /// and the internal non-streaming callers, which simply concatenate the deltas.
     /// Pure and static so the exact payload can be unit-tested without a server.
     public static func encodeChatBody(_ request: ChatRequest) throws -> Data {
-        var messages = request.messages.map { turn in
+        var turns = request.messages
+        if let effort = reasoningEffort(for: request.think) {
+            turns.insert(ChatTurn(role: Role.system.rawValue, content: "Reasoning: \(effort)"), at: 0)
+        }
+        let messages = collapsingSystemTurns(turns).map { turn in
             ChatBody.Message(
                 role: turn.role,
                 content: turn.content,
@@ -239,9 +266,6 @@ public struct LlamaServerClient: Sendable, ServerBackend {
                         function: .init(name: $0.name, arguments: $0.arguments.jsonString))
                 },
                 toolCallId: turn.toolCallID)
-        }
-        if let effort = reasoningEffort(for: request.think) {
-            messages.insert(ChatBody.Message(role: Role.system.rawValue, content: "Reasoning: \(effort)"), at: 0)
         }
         let p = request.parameters
         let body = ChatBody(

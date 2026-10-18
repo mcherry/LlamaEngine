@@ -3,7 +3,7 @@ import LlamaEngine
 
 /// A plain, `Codable` snapshot of a `ChatSession`'s configuration — everything that
 /// affects *how* a chat runs (backend, model, system prompt, generation, history,
-/// retrieval, image, and speech settings) but not its messages, title, or timestamps.
+/// retrieval, image, speech, and tool settings) but not its messages, title, or timestamps.
 /// Used to duplicate a session's setup ("new chat like this") and to save/apply reusable
 /// presets.
 ///
@@ -50,6 +50,10 @@ public struct SessionConfig: Codable, Sendable {
     public var ttsEnabled: Bool?
     public var ttsEngineRaw: String?
     public var ttsAutoSpeak: Bool?
+
+    // Tool calling. Approvals are deliberately absent: they belong to the chat that granted them.
+    public var toolsEnabled: Bool?
+    public var allowedToolNames: [String]?
 
     public init() {}
 }
@@ -106,6 +110,8 @@ public extension ChatSession {
         c.ttsEnabled = ttsEnabled
         c.ttsEngineRaw = ttsEngineRaw
         c.ttsAutoSpeak = ttsAutoSpeak
+        c.toolsEnabled = toolsEnabled
+        c.allowedToolNames = allowedToolNames
         return c
     }
 
@@ -150,5 +156,12 @@ public extension ChatSession {
         if let v = c.ttsEnabled { ttsEnabled = v }
         if let v = c.ttsEngineRaw { ttsEngineRaw = v }
         if let v = c.ttsAutoSpeak { ttsAutoSpeak = v }
+
+        if let v = c.toolsEnabled { toolsEnabled = v }
+        if let v = c.allowedToolNames {
+            allowedToolNames = v
+            // Same invariant the tools picker keeps: nothing stays approved once it's not allowed.
+            approvedToolNames.removeAll { !v.contains($0) }
+        }
     }
 }

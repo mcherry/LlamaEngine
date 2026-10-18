@@ -2,10 +2,8 @@ import XCTest
 import LlamaEngine
 @testable import LlamaEngineStore
 
-/// Tests for Llamatron-side types that back retrieval but haven't moved into
-/// LlamaEngine yet: the SwiftData `DocumentChunk` embedding packing and the
-/// `OllamaModel` embedding-model heuristic. (These migrate to the package with the
-/// store and backend layers in later phases.)
+/// Tests for the types that back retrieval: the SwiftData `DocumentChunk` embedding
+/// packing and the `OllamaModel` embedding-model heuristic.
 final class EmbeddingRoundTripTests: XCTestCase {
 
     func testEmbeddingEncodeDecodeRoundTrip() {

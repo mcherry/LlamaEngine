@@ -58,7 +58,13 @@ final class ToolPolicyTests: XCTestCase {
 
     func testApprovedForSessionAllowsWithoutConfirm() {
         XCTAssertEqual(decide(.network, on { $0.approvedForSession = ["t"] }), .allow)
-        XCTAssertEqual(decide(.mutating, on { $0.approvedForSession = ["t"] }), .allow)
+    }
+
+    /// `mutating` is deliberately exempt from the session-approval bypass. A write has to
+    /// re-ask every time, so a stale, restored, or tampered approval set cannot grant one
+    /// silently — the enum documents this, and now the policy enforces it.
+    func testApprovedForSessionNeverBypassesMutating() {
+        XCTAssertEqual(decide(.mutating, on { $0.approvedForSession = ["t"] }), .needsConfirmation)
     }
 
     func testActiveSpecsAdvertiseOnlyAllowListedTools() {

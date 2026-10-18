@@ -1,8 +1,7 @@
 import Foundation
 
-/// How much a tool can affect the world, used to decide whether it may auto-run. Phase B
-/// ships only `pure` tools (auto-run); the confirmation gate for higher tiers arrives in a
-/// later phase. Ordered least-to-most privileged.
+/// How much a tool can affect the world, which `ToolPolicy` maps to a default: `pure` auto-runs,
+/// `readLocal` and `network` ask first, `mutating` asks every time. Ordered least-to-most privileged.
 public enum ToolRiskTier: String, Sendable, Codable, CaseIterable {
     case pure       // no I/O, no side effects (e.g. current_datetime, calculator)
     case readLocal  // reads on-device data the user already granted (e.g. session RAG)
@@ -92,14 +91,16 @@ public struct ToolRegistry: Sendable {
     /// The built-in tools shipped with the engine, for a host to build a registry from and
     /// present in its allow-list UI. Instantiated with default config here (metadata only —
     /// the host builds the *runnable* registry with real config: search keys, the session's
-    /// chunks, and the local-network policy). Grows as later phases add tools.
+    /// chunks, the local-network policy, and the granted folders). A host hides any tool its
+    /// platform can't run.
     public static var builtInTools: [any AgentTool] {
         [CurrentDateTimeTool(),
          GetWeatherTool(),
          WebSearchTool(),
          RetrieveContextTool(),
          RenderGraphicTool(),
-         FetchURLTool()]
+         FetchURLTool(),
+         WriteFileTool()]
     }
 
     /// The specs to advertise to the model. Empty registry ⇒ no tools sent.
