@@ -76,13 +76,24 @@ public struct ContextAssembler: Sendable {
     public var embedder: any EmbeddingBackend
     /// The session's chat model, reused for map-reduce summarization.
     public var chatModel: String
+    /// The `num_ctx` sent with summary requests. Pass the chat's own: Ollama reloads the model
+    /// whenever it changes.
+    public var contextSize: Int
+
+    /// Excerpts scoring below this fraction of the best one are left out, so a large window
+    /// isn't filled with loose matches.
+    public static let relevanceCutoff = 0.6
+    /// The most excerpts retrieval sends for one question.
+    public static let maxExcerpts = 24
 
     public init(client: (any ServerBackend)?,
                 embedder: any EmbeddingBackend,
-                chatModel: String) {
+                chatModel: String,
+                contextSize: Int = 8192) {
         self.client = client
         self.embedder = embedder
         self.chatModel = chatModel
+        self.contextSize = contextSize
     }
 
     public func assemble(chunks: [RetrievableChunk],
@@ -103,7 +114,8 @@ public struct ContextAssembler: Sendable {
                 case .truncate:
                     return truncate(chunks, available: available, attempted: attempted)
                 case .retrieval:
-                    return try await retrieve(chunks, query: retrievalQuery ?? query, available: available, attempted: attempted, onStatus: onStatus)
+                    return try await retrieve(chunks, question: query, query: retrievalQuery ?? query,
+                                              available: available, attempted: attempted, onStatus: onStatus)
                 case .summarize:
                     return try await summarize(chunks, query: query, available: available, attempted: attempted, onStatus: onStatus)
                 }
@@ -145,6 +157,7 @@ public struct ContextAssembler: Sendable {
     }
 
     private func retrieve(_ chunks: [RetrievableChunk],
+                          question: String,
                           query: String,
                           available: Int,
                           attempted: [ContextStrategy],
@@ -158,20 +171,20 @@ public struct ContextAssembler: Sendable {
         guard !queryVector.isEmpty else { throw OllamaError.server("Empty query embedding.") }
         let dimension = queryVector.count
 
-        // Stage 1 — lexical pre-filter: narrow to candidates before the costly embedding of
-        // missing chunks. Only engages for large sets with enough keyword matches; small docs
-        // and synonym-only queries fall through to full semantic retrieval over everything.
-        let keywords = LexicalFilter.keywords(from: query)
-        let kept = LexicalFilter.narrow(chunks.map(\.text),
-                                        paths: chunks.map(\.filePath),
-                                        keywords: keywords)
-        var working = kept.count == chunks.count ? chunks : kept.map { chunks[$0] }
+        // Keywords come from the question alone, so a follow-up isn't dragged toward the
+        // previous answer's wording; the embedding still sees the recent turns.
+        let lexical = LexicalFilter.bm25(chunks.map(\.text),
+                                         paths: chunks.map(\.filePath),
+                                         keywords: LexicalFilter.keywords(from: question))
+
+        // Embed what isn't cached yet. For a large source that's only the best keyword matches,
+        // so the first question doesn't wait on the whole source; cached chunks all still count.
+        var working = chunks
         var newEmbeddings: [UUID: [Float]] = [:]
-        let missing = working.enumerated().filter { $0.element.embedding?.count != dimension }
+        let missing = LexicalFilter.narrow(lexical).filter { working[$0].embedding?.count != dimension }
         if !missing.isEmpty {
             // Embed in batches so progress can be reported for a large source (each batch is
-            // still embedded in parallel internally). Cached chunks are skipped, so repeat
-            // queries stay cheap.
+            // still embedded in parallel internally).
             let total = missing.count
             let batchSize = 48
             var start = 0
@@ -179,46 +192,51 @@ public struct ContextAssembler: Sendable {
                 let end = min(start + batchSize, total)
                 let slice = Array(missing[start..<end])
                 let vectors = try await embedder.embed(model: "",
-                                                       input: slice.map { "search_document: " + $0.element.text })
-                for (k, item) in slice.enumerated() {
-                    working[item.offset].embedding = vectors[k]
-                    newEmbeddings[item.element.id] = vectors[k]
+                                                       input: slice.map { "search_document: " + working[$0].text })
+                for (k, index) in slice.enumerated() {
+                    working[index].embedding = vectors[k]
+                    newEmbeddings[working[index].id] = vectors[k]
                 }
                 start = end
                 await onStatus?("Embedding excerpts… \(end) of \(total)")
             }
         }
 
-        let scored = working.compactMap { chunk -> (chunk: RetrievableChunk, score: Float)? in
-            guard let embedding = chunk.embedding else { return nil }
-            return (chunk, Vector.cosineSimilarity(queryVector, embedding))
-        }.sorted { $0.score > $1.score }
+        let relevance = Self.hybridRelevance(
+            semantic: working.map { chunk in
+                chunk.embedding.flatMap { $0.count == dimension ? Vector.cosineSimilarity(queryVector, $0) : nil }
+            },
+            lexical: lexical)
+        guard let best = relevance.max(), best > 0 else { throw OllamaError.server("No relevant content found.") }
+        // MMR compares each pick against the whole pool, so cap it well above `maxExcerpts`.
+        let pool = relevance.indices
+            .filter { relevance[$0] >= Self.relevanceCutoff * best }
+            .sorted { relevance[$0] > relevance[$1] }
+            .prefix(100)
 
         // Select with Maximal Marginal Relevance so the chosen excerpts are both
         // relevant *and* diverse: MMR penalizes a candidate that duplicates what's
         // already picked, so near-identical chunks (e.g. overlapping neighbors) don't
         // crowd out other useful passages and waste the budget.
-        let candidates = scored.map {
-            MMRCandidate(id: $0.chunk.id,
-                         relevance: $0.score,
-                         embedding: $0.chunk.embedding ?? [],
-                         tokens: TokenEstimator.estimate($0.chunk.text))
+        let candidates = pool.map {
+            MMRCandidate(id: working[$0].id,
+                         relevance: Float(relevance[$0]),
+                         embedding: working[$0].embedding ?? [],
+                         tokens: TokenEstimator.estimate(working[$0].text))
         }
-        let selectedIDs = Self.mmrSelect(candidates, available: available)
-        let byID = Dictionary(working.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let selected = selectedIDs.compactMap { byID[$0] }
+        let selectedIDs = Set(Self.mmrSelect(candidates, available: available, limit: Self.maxExcerpts))
+        let selected = pool.filter { selectedIDs.contains(working[$0].id) }
         guard !selected.isEmpty else { throw OllamaError.server("No relevant content found.") }
 
-        let selectedSet = Set(selectedIDs)
-        let retrieved = scored
-            .filter { selectedSet.contains($0.chunk.id) }
-            .map { RetrievedChunkInfo(id: $0.chunk.id,
-                                     sourceName: $0.chunk.displaySource,
-                                     ordinal: $0.chunk.ordinal,
-                                     score: $0.score,
-                                     text: $0.chunk.text) }
+        let retrieved = selected.map {
+            RetrievedChunkInfo(id: working[$0].id,
+                               sourceName: working[$0].displaySource,
+                               ordinal: working[$0].ordinal,
+                               score: Float(relevance[$0]),
+                               text: working[$0].text)
+        }
 
-        let ordered = selected.sorted { $0.ordinal < $1.ordinal }
+        let ordered = selected.map { working[$0] }.sorted { $0.ordinal < $1.ordinal }
         return AssembledContext(
             contextText: render(ordered),
             strategyUsed: .retrieval,
@@ -273,7 +291,7 @@ public struct ContextAssembler: Sendable {
                 ChatTurn(role: Role.system.rawValue, content: system),
                 ChatTurn(role: Role.user.rawValue, content: user)
             ],
-            contextSize: 8192,
+            contextSize: contextSize,
             stream: false,
             numPredict: 512,
             think: false
@@ -360,16 +378,34 @@ extension ContextAssembler {
         return String(tail.suffix(maxRecentChars)) + "\n" + current
     }
 
+    /// One 0–1 relevance per chunk from its meaning (`semantic`, cosine; nil when unembedded) and
+    /// keywords (`lexical`, BM25), each scaled to the best chunk. Keywords lead because the
+    /// on-device embedder is weak: alone it rarely ranks the answer near the top. With no keyword
+    /// hits at all, meaning decides alone. Pure/testable.
+    public static func hybridRelevance(semantic: [Float?], lexical: [Double],
+                                       semanticWeight: Double = 0.3) -> [Double] {
+        let present = semantic.compactMap { $0 }
+        let low = Double(present.min() ?? 0), high = Double(present.max() ?? 0)
+        let topLexical = lexical.max() ?? 0
+        return semantic.indices.map { i in
+            let meaning = semantic[i].map { high > low ? (Double($0) - low) / (high - low) : 1 } ?? 0
+            guard topLexical > 0 else { return meaning }
+            let keywords = i < lexical.count ? lexical[i] / topLexical : 0
+            return semanticWeight * meaning + (1 - semanticWeight) * keywords
+        }
+    }
+
     /// Orders candidates by Maximal Marginal Relevance and returns the IDs that fit the
-    /// token budget. Each step picks the candidate maximizing
+    /// token budget, at most `limit` of them. Each step picks the candidate maximizing
     /// `λ·relevance − (1−λ)·maxSimilarityToPicked`, so highly relevant but redundant
     /// chunks are deferred in favor of ones that add new information. Pure/testable.
-    public static func mmrSelect(_ candidates: [MMRCandidate], available: Int, lambda: Double = 0.7) -> [UUID] {
-        guard available > 0 else { return [] }
+    public static func mmrSelect(_ candidates: [MMRCandidate], available: Int, limit: Int = .max,
+                                 lambda: Double = 0.7) -> [UUID] {
+        guard available > 0, limit > 0 else { return [] }
         var remaining = candidates
         var selected: [MMRCandidate] = []
         var used = 0
-        while !remaining.isEmpty {
+        while !remaining.isEmpty, selected.count < limit {
             var bestIndex = 0
             var bestScore = -Double.greatestFiniteMagnitude
             for (index, candidate) in remaining.enumerated() {

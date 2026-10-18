@@ -20,42 +20,57 @@ final class LexicalFilterTests: XCTestCase {
         XCTAssertTrue(kws.contains("retry"))
     }
 
-    func testHitCountSubstringCaseInsensitive() {
-        // Substring match (no stemming): "auth" hits "Authenticator", "retry" hits "retry".
-        XCTAssertEqual(LexicalFilter.hitCount("The Authenticator retry loop", keywords: ["auth", "retry", "cache"]), 2)
-        XCTAssertEqual(LexicalFilter.hitCount("", keywords: ["auth"]), 0)
-        XCTAssertEqual(LexicalFilter.hitCount("anything", keywords: []), 0)
+    // MARK: - BM25
+
+    func testBM25RanksARareTermAboveCommonOnes() {
+        var texts = (0..<20).map { "the shell runs a command \($0)" }
+        texts[7] = "the shell runs a pipeline with pipefail"
+        let scores = LexicalFilter.bm25(texts, keywords: ["shell", "pipefail"])
+        XCTAssertEqual(scores.indices.max { scores[$0] < scores[$1] }, 7)
     }
+
+    func testBM25MatchesWordPrefixesAndIdentifierParts() {
+        let scores = LexicalFilter.bm25(["The Authenticator retry loop", "isLoading spinner", "auth_token flow", "nothing here"],
+                                        keywords: ["auth", "loading", "token"])
+        XCTAssertGreaterThan(scores[0], 0)   // "auth" starts "Authenticator"
+        XCTAssertGreaterThan(scores[1], 0)   // camelCase part
+        XCTAssertGreaterThan(scores[2], 0)   // snake_case part
+        XCTAssertEqual(scores[3], 0)
+    }
+
+    func testBM25SplitsOnUnicodePunctuation() {
+        let scores = LexicalFilter.bm25(["\u{201C}quoted\u{201D} words\u{2014}dashes", "other"], keywords: ["quoted", "dashes"])
+        XCTAssertGreaterThan(scores[0], 0)
+        XCTAssertEqual(scores[1], 0)
+    }
+
+    func testBM25IsZeroWithoutKeywords() {
+        XCTAssertEqual(LexicalFilter.bm25(["anything", "else"], keywords: []), [0, 0])
+        XCTAssertEqual(LexicalFilter.bm25([], keywords: ["x"]), [])
+    }
+
+    func testBM25CountsPathHits() {
+        let scores = LexicalFilter.bm25(["same text", "same text"],
+                                        paths: ["src/Auth/Login.swift", "src/misc.swift"],
+                                        keywords: ["auth"])
+        XCTAssertGreaterThan(scores[0], scores[1])
+    }
+
+    // MARK: - Embedding shortlist
 
     func testNarrowKeepsAllForSmallSets() {
-        let texts = (0..<10).map { "chunk \($0)" }
-        XCTAssertEqual(LexicalFilter.narrow(texts, keywords: ["chunk"]), Array(0..<10))
+        XCTAssertEqual(LexicalFilter.narrow([Double](repeating: 1, count: 10)), Array(0..<10))
     }
 
-    func testNarrowKeepsAllWhenNoKeywords() {
-        let texts = (0..<300).map { "chunk \($0)" }
-        XCTAssertEqual(LexicalFilter.narrow(texts, keywords: []).count, 300)
+    func testNarrowKeepsAllWhenTooFewMatch() {
+        var scores = [Double](repeating: 0, count: 250)
+        scores[0] = 2; scores[1] = 1
+        XCTAssertEqual(LexicalFilter.narrow(scores, floor: 8).count, 250)
     }
 
-    func testNarrowSelectsMatchesForLargeSets() {
-        let texts = (0..<250).map { $0 % 12 == 0 ? "auth token flow \($0)" : "unrelated content \($0)" }
-        let kept = LexicalFilter.narrow(texts, keywords: ["auth"], engageAbove: 200, limit: 300, floor: 8)
-        XCTAssertLessThan(kept.count, 250)
-        XCTAssertTrue(kept.allSatisfy { texts[$0].contains("auth") })
-    }
-
-    func testNarrowFallsBackWhenTooFewMatches() {
-        var texts = (0..<250).map { "unrelated \($0)" }
-        texts[0] = "auth here"; texts[1] = "auth again"
-        XCTAssertEqual(LexicalFilter.narrow(texts, keywords: ["auth"], floor: 8).count, 250)
-    }
-
-    func testNarrowWeightsPathHits() {
-        let texts = (0..<250).map { "unrelated \($0)" }
-        var paths: [String?] = (0..<250).map { _ in "src/misc.swift" }
-        for i in 0..<10 { paths[i] = "src/Auth/Login.swift" }
-        let kept = LexicalFilter.narrow(texts, paths: paths, keywords: ["auth"], floor: 8)
-        XCTAssertLessThan(kept.count, 250)
-        XCTAssertTrue(kept.contains(0))
+    func testNarrowKeepsTheBestMatchesForLargeSets() {
+        let scores = (0..<250).map { $0 % 12 == 0 ? Double($0) : 0 }
+        let kept = LexicalFilter.narrow(scores, limit: 5)
+        XCTAssertEqual(kept, [240, 228, 216, 204, 192])
     }
 }

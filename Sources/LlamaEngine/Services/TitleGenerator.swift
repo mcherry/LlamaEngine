@@ -4,10 +4,13 @@ import Foundation
 /// model. Best-effort and cancellable: it never blocks the chat, and a failure just
 /// leaves the existing title in place.
 public enum TitleGenerator {
+    /// - Parameter contextSize: the `num_ctx` to send; pass the chat's own, since Ollama reloads
+    ///   the model whenever it changes.
     public static func generate(model: String,
                          userMessage: String,
                          assistantReply: String,
-                         client: ChatStreaming) async -> String? {
+                         client: ChatStreaming,
+                         contextSize: Int = 4096) async -> String? {
         let system = "You write short conversation titles. Reply with only a 3 to 6 word title. No quotes, no punctuation, no preamble, no thinking."
         let trimmedReply = String(assistantReply.prefix(500))
         let user = "First user message:\n\(userMessage)\n\nAssistant reply:\n\(trimmedReply)\n\nTitle:"
@@ -18,7 +21,7 @@ public enum TitleGenerator {
                 ChatTurn(role: Role.system.rawValue, content: system),
                 ChatTurn(role: Role.user.rawValue, content: user)
             ],
-            contextSize: 4096,
+            contextSize: contextSize,
             stream: false,
             // Generous budget so a thinking model can finish reasoning *and* still
             // emit the title; with a tiny budget it spends everything on hidden

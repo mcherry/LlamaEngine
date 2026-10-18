@@ -80,4 +80,43 @@ final class ContextAssemblerTests: XCTestCase {
         let order = ContextAssembler.mmrSelect([candidate(id, 0.9, [1, 0], tokens: 9999)], available: 100)
         XCTAssertEqual(order, [id])
     }
+
+    func testMMRStopsAtTheLimit() {
+        let candidates = (0..<5).map { candidate(UUID(), 0.9 - Float($0) / 10, [Float($0), 1]) }
+        XCTAssertEqual(ContextAssembler.mmrSelect(candidates, available: 1000, limit: 2).count, 2)
+    }
+
+    // MARK: - Hybrid relevance
+
+    func testHybridRelevanceLetsKeywordsLead() {
+        // Chunk 0 is closest in meaning, chunk 1 has the keywords.
+        let relevance = ContextAssembler.hybridRelevance(semantic: [0.5, 0.3, 0.1], lexical: [0, 4, 0])
+        XCTAssertGreaterThan(relevance[1], relevance[0])
+        XCTAssertEqual(relevance[2], 0)
+    }
+
+    func testHybridRelevanceUsesMeaningAloneWithoutKeywordHits() {
+        let relevance = ContextAssembler.hybridRelevance(semantic: [0.2, 0.4, nil], lexical: [0, 0, 0])
+        XCTAssertEqual(relevance, [0, 1, 0])
+    }
+
+    /// Embeds by one telltale word, so retrieval runs without the on-device model.
+    private struct WordEmbedder: EmbeddingBackend {
+        func embed(model: String, input: [String]) async throws -> [[Float]] {
+            input.map { $0.contains("pipefail") ? [1, 0] : [0, 1] }
+        }
+    }
+
+    func testRetrievalLeavesOutLooseMatchesEvenWithRoomToSpare() async throws {
+        var chunks = (0..<40).map {
+            RetrievableChunk(id: UUID(), sourceName: "manual", ordinal: $0, text: "The shell runs command number \($0).")
+        }
+        chunks[12] = RetrievableChunk(id: UUID(), sourceName: "manual", ordinal: 12,
+                                      text: "With pipefail set, a pipeline fails if any command in it fails.")
+        let assembler = ContextAssembler(client: nil, embedder: WordEmbedder(), chatModel: "m")
+        let result = await assembler.assemble(chunks: chunks, query: "What does pipefail do to a command?",
+                                              available: 100_000, plan: [.retrieval])
+        XCTAssertEqual(result?.strategyUsed, .retrieval)
+        XCTAssertEqual(result?.retrieved.map(\.ordinal), [12])
+    }
 }

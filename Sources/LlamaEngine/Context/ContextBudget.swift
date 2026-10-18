@@ -31,11 +31,17 @@ public struct ContextBudget {
     /// doesn't overflow once the server tokenizes it for real. Errs toward reliability.
     public static let safetyFraction = 0.75
 
+    /// However long the conversation grows, attached documents keep at least this share of
+    /// the room left after the system prompt, the new message, and the reply reserve. History
+    /// management then fits the history into what's left, instead of documents silently
+    /// dropping out of a long chat.
+    public static let minimumDocumentShare = 0.5
+
     /// Tokens left for injected document context (never negative), after reserving the
     /// reply and applying the estimate-undercount safety margin.
     public var availableForContext: Int {
-        let used = systemTokens + historyTokens + userTokens + responseReserve
-        let free = max(0, contextSize - used)
+        let room = max(0, contextSize - systemTokens - userTokens - responseReserve)
+        let free = max(room - historyTokens, Int(Double(room) * Self.minimumDocumentShare))
         return Int((Double(free) * Self.safetyFraction).rounded(.down))
     }
 }

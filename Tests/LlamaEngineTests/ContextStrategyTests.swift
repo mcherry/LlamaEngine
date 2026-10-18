@@ -27,6 +27,13 @@ final class ContextStrategyTests: XCTestCase {
         XCTAssertEqual(budget.availableForContext, 0)
     }
 
+    func testDocumentsKeepTheirShareInALongChat() {
+        // History alone overflows the window; documents still get half the room (24,526 after
+        // the 8,192 reply reserve), at the usual 0.75 safety fraction.
+        let budget = ContextBudget(contextSize: 32768, systemTokens: 0, historyTokens: 50_000, userTokens: 50)
+        XCTAssertEqual(budget.availableForContext, Int((Double(24_526 / 2) * 0.75).rounded(.down)))
+    }
+
     func testBudgetResponseReserveBounds() {
         XCTAssertEqual(ContextBudget(contextSize: 1000, systemTokens: 0, historyTokens: 0, userTokens: 0).responseReserve, 1024)
         XCTAssertEqual(ContextBudget(contextSize: 100000, systemTokens: 0, historyTokens: 0, userTokens: 0).responseReserve, 8192)

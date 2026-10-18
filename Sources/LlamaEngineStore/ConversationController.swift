@@ -34,9 +34,9 @@ public final class ConversationController {
     /// values, so budgeting reflects how each model actually tokenizes.
     private let tokenCalibrator = TokenCalibrator()
 
-    /// The highest `num_ctx` used so far per session. Right-sizing never drops below
-    /// this within a session, so the request window doesn't shrink between turns and
-    /// needlessly invalidate the server's prompt (KV) cache.
+    /// The `num_ctx` of each session's latest chat request. Right-sizing never drops below it
+    /// within a session, so the request window doesn't shrink between turns and needlessly
+    /// invalidate the server's prompt (KV) cache; side requests reuse it.
     private var contextFloors: [UUID: Int] = [:]
 
     public init() {}
@@ -103,10 +103,10 @@ public final class ConversationController {
             guard let self else { return }
 
             // Assemble document context (may embed/summarize) before the request.
-            let contextBlock = await self.assembleContext(query: trimmed,
-                                                          session: session,
-                                                          into: assistant,
-                                                          client: client)
+            let documents = await self.assembleContext(query: trimmed,
+                                                       session: session,
+                                                       into: assistant,
+                                                       client: client)
 
             if Task.isCancelled {
                 if assistant.content.isEmpty { modelContext.delete(assistant) }
@@ -130,11 +130,11 @@ public final class ConversationController {
 
             let historyTurns = await self.assembleHistory(session: session,
                                                           newUserText: trimmed,
-                                                          contextBlock: contextBlock,
+                                                          contextBlock: documents?.text,
                                                           into: assistant,
                                                           client: client)
             let turns = self.buildTurns(for: session,
-                                        contextBlock: contextBlock,
+                                        documents: documents,
                                         historyTurns: historyTurns,
                                         imageDescription: vision.description,
                                         nativeImages: vision.nativeImages,
@@ -160,10 +160,10 @@ public final class ConversationController {
             let stableCtx: Int
             if rightSizeContext {
                 stableCtx = min(ceiling, max(effectiveCtx, self.contextFloors[session.id] ?? 0))
-                self.contextFloors[session.id] = stableCtx
             } else {
                 stableCtx = effectiveCtx
             }
+            self.contextFloors[session.id] = stableCtx
             // keep_alive: negative keeps the model resident indefinitely; positive is a
             // minute window; zero omits the field (server default).
             let keepAlive: String? = keepAliveMinutes < 0 ? "-1"
@@ -740,16 +740,17 @@ public final class ConversationController {
     /// When `nativeImages` is non-empty, they're attached to the latest user turn so a
     /// vision-capable primary model receives the image directly.
     ///
-    /// Turn order is deliberately stable-prefix-first — system prompt, then guidance,
-    /// then the reference/context blocks, then history ending in the new user turn — so
-    /// the large, unchanging leading content stays byte-identical across turns and the
-    /// server can reuse its cached prompt (KV) prefix instead of re-evaluating it.
-    private func buildTurns(for session: ChatSession,
-                            contextBlock: String?,
-                            historyTurns: [ChatTurn],
-                            imageDescription: String? = nil,
-                            nativeImages: [String] = [],
-                            diagramGuidance: Bool = false) -> [ChatTurn] {
+    /// Turn order is deliberately stable-prefix-first — system prompt, guidance, inline
+    /// documents, then history ending in the new user turn — so the unchanging leading content
+    /// stays byte-identical across turns and the server can reuse its cached prompt (KV)
+    /// prefix. Retrieved or summarized context differs every turn, so it travels with the new
+    /// message instead; up front it would force the whole history to be reprocessed.
+    func buildTurns(for session: ChatSession,
+                    documents: (text: String, strategy: ContextStrategy)?,
+                    historyTurns: [ChatTurn],
+                    imageDescription: String? = nil,
+                    nativeImages: [String] = [],
+                    diagramGuidance: Bool = false) -> [ChatTurn] {
         var turns: [ChatTurn] = []
         let systemPrompt = session.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !systemPrompt.isEmpty {
@@ -758,16 +759,8 @@ public final class ConversationController {
         if diagramGuidance {
             turns.append(ChatTurn(role: Role.system.rawValue, content: Self.diagramGuidanceText))
         }
-        if let contextBlock, !contextBlock.isEmpty {
-            let preamble = """
-            You have been given reference material to help answer the conversation. \
-            Use it when relevant; if it doesn't contain the answer, say so rather than guessing.
-
-            <reference_material>
-            \(contextBlock)
-            </reference_material>
-            """
-            turns.append(ChatTurn(role: Role.system.rawValue, content: preamble))
+        if let documents, documents.strategy == .inline {
+            turns.append(ChatTurn(role: Role.system.rawValue, content: Self.referenceBlock(documents.text)))
         }
         if let imageDescription, !imageDescription.isEmpty {
             turns.append(ChatTurn(role: Role.system.rawValue, content: """
@@ -780,14 +773,29 @@ public final class ConversationController {
             """))
         }
         var history = historyTurns
-        // Attach native images to the last user turn (the new message).
-        if !nativeImages.isEmpty,
-           let lastUser = history.lastIndex(where: { $0.role == Role.user.rawValue }) {
-            let t = history[lastUser]
-            history[lastUser] = ChatTurn(role: t.role, content: t.content, images: nativeImages)
+        if let lastUser = history.lastIndex(where: { $0.role == Role.user.rawValue }) {
+            let turn = history[lastUser]
+            var content = turn.content
+            if let documents, documents.strategy != .inline {
+                content = Self.referenceBlock(documents.text) + "\n\n" + content
+            }
+            history[lastUser] = ChatTurn(role: turn.role, content: content,
+                                         images: nativeImages.isEmpty ? turn.images : nativeImages)
         }
         turns.append(contentsOf: history)
         return turns
+    }
+
+    /// The attached-source context with its usage instruction.
+    private static func referenceBlock(_ text: String) -> String {
+        """
+        You have been given reference material to help answer the conversation. \
+        Use it when relevant; if it doesn't contain the answer, say so rather than guessing.
+
+        <reference_material>
+        \(text)
+        </reference_material>
+        """
     }
 
     // MARK: - Vision (image attachments)
@@ -978,7 +986,10 @@ public final class ConversationController {
             let convoText = toFold.map { "\($0.role): \($0.content)" }.joined(separator: "\n\n")
             let prior = summary.isEmpty ? "" : "Summary so far:\n\(summary)\n\n"
             let input = "\(prior)New conversation to fold into the summary:\n\(convoText)"
-            if let updated = await summarizeText(input, client: client, model: session.modelName) {
+            let contextSize = sideRequestContextSize(for: session)
+            holdContextSize(contextSize, for: session)
+            if let updated = await summarizeText(input, client: client, model: session.modelName,
+                                                 contextSize: contextSize) {
                 summary = updated
                 session.historySummary = updated
                 session.summarizedUntil = older.last?.createdAt
@@ -1084,12 +1095,13 @@ public final class ConversationController {
     }
 
     /// One-shot summary call used by rolling-summary history mode.
-    private func summarizeText(_ text: String, client: any ServerBackend, model: String) async -> String? {
+    private func summarizeText(_ text: String, client: any ServerBackend, model: String,
+                               contextSize: Int) async -> String? {
         let system = "You maintain a running summary of a conversation so it can continue within a limited context window. Preserve decisions, facts, names, numbers, the user's goals, and open questions. Drop pleasantries and redundancy. Output only the updated summary."
         let request = ChatRequest(model: model,
                                   messages: [ChatTurn(role: Role.system.rawValue, content: system),
                                              ChatTurn(role: Role.user.rawValue, content: text)],
-                                  contextSize: 8192, stream: false, numPredict: 512, think: false)
+                                  contextSize: contextSize, stream: false, numPredict: 512, think: false)
         do {
             var out = ""
             for try await chunk in client.chat(request) { out += chunk.contentDelta }
@@ -1108,7 +1120,7 @@ public final class ConversationController {
     private func assembleContext(query: String,
                                  session: ChatSession,
                                  into assistant: ChatMessage,
-                                 client: (any ServerBackend)?) async -> String? {
+                                 client: (any ServerBackend)?) async -> (text: String, strategy: ContextStrategy)? {
         let attachments = session.orderedAttachments.filter { !$0.isImage }
         guard !attachments.isEmpty else { return nil }
         // Retrieval uses on-device embeddings, so document context works with any backend
@@ -1131,9 +1143,11 @@ public final class ConversationController {
         guard !chunks.isEmpty else { return nil }
 
         let contentTokens = chunks.reduce(0) { $0 + TokenEstimator.estimate($1.text) }
-        let historyTokens = session.orderedMessages
+        // Earlier turns only: the new message is already inserted, and counted as `userTokens`.
+        let priorTurns = session.orderedMessages
             .filter { $0.role != .system && !$0.content.isEmpty }
-            .reduce(0) { $0 + TokenEstimator.estimate($1.content) }
+            .dropLast()
+        let historyTokens = priorTurns.reduce(0) { $0 + TokenEstimator.estimate($1.content) }
         // Plan against a window shrunk by the model's learned tokenization factor, so
         // dense sources are recognized as too large (and retrieval/summarize kicks in)
         // before they would overflow the real window.
@@ -1161,17 +1175,15 @@ public final class ConversationController {
         default: activityStatus = "Reading attached sources…"
         }
 
+        let summaryContextSize = sideRequestContextSize(for: session)
         let assembler = ContextAssembler(client: client,
                                          embedder: AppleEmbedder(),
-                                         chatModel: session.modelName)
+                                         chatModel: session.modelName,
+                                         contextSize: summaryContextSize)
         // Retrieve using the question plus a short tail of recent turns so follow-ups
         // resolve against the surrounding conversation.
-        let priorTurns = session.orderedMessages
-            .filter { $0.role != .system && !$0.content.isEmpty }
-            .dropLast()
-            .suffix(2)
-            .map(\.content)
-        let retrievalQuery = ContextAssembler.enrichedRetrievalQuery(current: query, recentTurns: Array(priorTurns))
+        let retrievalQuery = ContextAssembler.enrichedRetrievalQuery(current: query,
+                                                                     recentTurns: priorTurns.suffix(2).map(\.content))
         guard let result = await assembler.assemble(chunks: chunks,
                                                     query: query,
                                                     available: available,
@@ -1180,6 +1192,9 @@ public final class ConversationController {
                                                     onStatus: { [weak self] status in
                                                         await MainActor.run { self?.activityStatus = status }
                                                     }) else { return nil }
+        if result.attempted.contains(.summarize) {
+            holdContextSize(summaryContextSize, for: session)
+        }
 
         // Persist freshly computed embeddings back onto the @Model chunks.
         if !result.newEmbeddings.isEmpty {
@@ -1208,7 +1223,19 @@ public final class ConversationController {
         if !result.retrieved.isEmpty {
             assistant.retrievalData = try? JSONEncoder().encode(result.retrieved)
         }
-        return result.contextText
+        return (result.contextText, result.strategyUsed)
+    }
+
+    /// The `num_ctx` for a side request to the chat model (a summary, the title): what the
+    /// session's chat requests use, since Ollama reloads a model whenever `num_ctx` changes.
+    private func sideRequestContextSize(for session: ChatSession) -> Int {
+        min(contextCeiling(for: session), contextFloors[session.id] ?? .max)
+    }
+
+    /// Keeps the session's next chat request at `size` or above after a side request ran at it,
+    /// so the model isn't reloaded at a smaller size straight after.
+    private func holdContextSize(_ size: Int, for session: ChatSession) {
+        contextFloors[session.id] = max(contextFloors[session.id] ?? 0, size)
     }
 
     // MARK: - Auto-naming
@@ -1223,7 +1250,8 @@ public final class ConversationController {
         let title = await TitleGenerator.generate(model: session.modelName,
                                                    userMessage: firstUser,
                                                    assistantReply: firstAssistant,
-                                                   client: client)
+                                                   client: client,
+                                                   contextSize: sideRequestContextSize(for: session))
         // Re-check: the user may have renamed while the title was generating. Mark the
         // session done auto-naming so it only happens once (until an explicit reset).
         if let title, session.titleIsAuto {

@@ -65,14 +65,20 @@ public struct RetrieveContextTool: AgentTool {
             }
         }
 
-        let ranked = chunks.indices
-            .map { (index: $0, score: Vector.cosineSimilarity(queryVector, vectors[$0])) }
-            .sorted { $0.score > $1.score }
+        let lexical = LexicalFilter.bm25(chunks.map(\.text), paths: chunks.map(\.filePath),
+                                         keywords: LexicalFilter.keywords(from: query))
+        let relevance = ContextAssembler.hybridRelevance(
+            semantic: vectors.map { $0.count == queryVector.count ? Vector.cosineSimilarity(queryVector, $0) : nil },
+            lexical: lexical)
+        let best = relevance.max() ?? 0
+        let ranked = relevance.indices
+            .filter { best > 0 && relevance[$0] >= ContextAssembler.relevanceCutoff * best }
+            .sorted { relevance[$0] > relevance[$1] }
 
         var picked: [RetrievableChunk] = []
         var usedTokens = 0
-        for entry in ranked.prefix(limit) {
-            let chunk = chunks[entry.index]
+        for index in ranked.prefix(limit) {
+            let chunk = chunks[index]
             let cost = TokenEstimator.estimate([chunk.text])
             if !picked.isEmpty && usedTokens + cost > maxTokens { break }
             picked.append(chunk)

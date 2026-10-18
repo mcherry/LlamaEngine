@@ -1,12 +1,7 @@
 import Foundation
 
-/// A cheap, dependency-free lexical pre-filter ("internal grep") that narrows a large set
-/// of chunks to those most likely relevant to a query *before* the expensive semantic
-/// (embedding + cosine) stage. Pure and synchronous, so it is unit-tested.
-///
-/// It is deliberately a *narrowing* step, never a hard gate: for small chunk sets, queries
-/// with no usable terms, or when too few chunks match lexically (a synonym-only query), it
-/// returns everything so semantic retrieval still sees the full set.
+/// Keyword search over chunks: BM25 relevance for ranking, and the shortlist of chunks worth
+/// embedding when a source is large. Pure and synchronous, so it is unit-tested.
 public enum LexicalFilter {
     /// Common English + question words that carry no retrieval signal.
     public static let stopWords: Set<String> = [
@@ -55,39 +50,108 @@ public enum LexicalFilter {
         return parts
     }
 
-    /// How many distinct query terms appear (case-insensitively) in the text. Substring
-    /// match, so partial identifiers count ("auth" hits "authenticate").
-    public static func hitCount(_ text: String, keywords: [String]) -> Int {
-        guard !keywords.isEmpty, !text.isEmpty else { return 0 }
-        var count = 0
-        for term in keywords where text.range(of: term, options: .caseInsensitive) != nil {
-            count += 1
+    /// BM25 relevance of each text to `keywords`, 0 when none appear. A word matches every
+    /// keyword it starts with ("file" finds "files" and "filename"), and words split like
+    /// `keywords(from:)`, so identifiers match by their parts. A hit in `paths` (parallel to
+    /// `texts`) counts double: the file a chunk came from is a strong signal.
+    public static func bm25(_ texts: [String], paths: [String?] = [], keywords: [String]) -> [Double] {
+        let n = texts.count
+        let terms = keywords.map { Array($0.utf8) }
+        guard n > 0, !terms.isEmpty else { return [Double](repeating: 0, count: n) }
+        var frequencies: [[Double]] = []
+        var lengths: [Int] = []
+        var documentFrequency = [Int](repeating: 0, count: terms.count)
+        frequencies.reserveCapacity(n)
+        lengths.reserveCapacity(n)
+        for i in 0..<n {
+            var tf = [Double](repeating: 0, count: terms.count)
+            lengths.append(countMatches(of: terms, in: texts[i], weight: 1, into: &tf))
+            if i < paths.count, let path = paths[i] {
+                _ = countMatches(of: terms, in: path, weight: 2, into: &tf)
+            }
+            for j in tf.indices where tf[j] > 0 { documentFrequency[j] += 1 }
+            frequencies.append(tf)
         }
-        return count
+        let k1 = 1.2, b = 0.75
+        let averageLength = max(1, Double(lengths.reduce(0, +)) / Double(n))
+        let idf = documentFrequency.map { log(1 + (Double(n - $0) + 0.5) / (Double($0) + 0.5)) }
+        return (0..<n).map { i in
+            let saturation = k1 * (1 - b + b * Double(lengths[i]) / averageLength)
+            var score = 0.0
+            for j in terms.indices where frequencies[i][j] > 0 {
+                let f = frequencies[i][j]
+                score += idf[j] * f * (k1 + 1) / (f + saturation)
+            }
+            return score
+        }
     }
 
-    /// Narrows chunk indices to the most lexically relevant. `paths` (optional, parallel to
-    /// `texts`) are matched too and weighted higher (a path hit is a strong signal). Returns
-    /// ALL indices when narrowing shouldn't apply: `texts.count <= engageAbove`, no keywords,
-    /// or fewer than `floor` chunks match (so it falls back to full semantic retrieval).
-    public static func narrow(_ texts: [String],
-                              paths: [String?] = [],
-                              keywords: [String],
+    /// Adds `weight` to `tf[j]` for each word of `text` that starts with `terms[j]`, and returns
+    /// the number of words. Works on Unicode scalars, not Characters: it runs over every chunk
+    /// for every question.
+    private static func countMatches(of terms: [[UInt8]], in text: String, weight: Double,
+                                     into tf: inout [Double]) -> Int {
+        var words = 0
+        var word: [UInt8] = []
+        var partStarts = [0]
+        var previousIsUpper = false
+
+        func match(_ piece: ArraySlice<UInt8>) {
+            for j in terms.indices where piece.starts(with: terms[j]) { tf[j] += weight }
+        }
+        func endWord() {
+            guard !word.isEmpty else { return }
+            words += 1
+            if partStarts.count > 1 {
+                for (k, start) in partStarts.enumerated() {
+                    match(word[start..<(k + 1 < partStarts.count ? partStarts[k + 1] : word.count)])
+                }
+            }
+            match(word[...])
+            word.removeAll(keepingCapacity: true)
+            partStarts.removeAll(keepingCapacity: true)
+            partStarts.append(0)
+            previousIsUpper = false
+        }
+
+        for scalar in text.unicodeScalars {
+            if scalar.isASCII {
+                let byte = UInt8(scalar.value)
+                switch byte {
+                case UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "0")...UInt8(ascii: "9"):
+                    word.append(byte)
+                    previousIsUpper = false
+                case UInt8(ascii: "A")...UInt8(ascii: "Z"):
+                    if !word.isEmpty, !previousIsUpper { partStarts.append(word.count) }
+                    word.append(byte + 32)
+                    previousIsUpper = true
+                default:
+                    endWord()
+                }
+            } else if scalar.properties.isAlphabetic || scalar.properties.numericType != nil {
+                let isUpper = scalar.properties.isUppercase
+                if isUpper, !word.isEmpty, !previousIsUpper { partStarts.append(word.count) }
+                word.append(contentsOf: scalar.properties.lowercaseMapping.utf8)
+                previousIsUpper = isUpper
+            } else {
+                endWord()
+            }
+        }
+        endWord()
+        return words
+    }
+
+    /// The chunks worth embedding for a large source: the best keyword matches by `scores`.
+    /// Returns every index for `engageAbove` chunks or fewer, or when fewer than `floor` match
+    /// (a question worded differently from the source), so semantic search still sees them all.
+    public static func narrow(_ scores: [Double],
                               engageAbove: Int = 200,
                               limit: Int = 300,
                               floor: Int = 8) -> [Int] {
-        let n = texts.count
-        guard n > engageAbove, !keywords.isEmpty else { return Array(0..<n) }
-        var scored: [(index: Int, score: Int)] = []
-        scored.reserveCapacity(n)
-        for i in 0..<n {
-            var score = hitCount(texts[i], keywords: keywords)
-            if i < paths.count, let path = paths[i] {
-                score += 2 * hitCount(path, keywords: keywords)   // a path hit weighs more
-            }
-            if score > 0 { scored.append((i, score)) }
-        }
-        guard scored.count >= floor else { return Array(0..<n) }
-        return scored.sorted { $0.score > $1.score }.prefix(limit).map(\.index)
+        let all = Array(scores.indices)
+        guard scores.count > engageAbove else { return all }
+        let matches = all.filter { scores[$0] > 0 }
+        guard matches.count >= floor else { return all }
+        return Array(matches.sorted { scores[$0] > scores[$1] }.prefix(limit))
     }
 }
