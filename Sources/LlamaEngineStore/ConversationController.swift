@@ -529,6 +529,7 @@ public final class ConversationController {
                 // Echo the assistant tool-call turn so the next round has the context.
                 toolTurns.append(ChatTurn(role: Role.assistant.rawValue,
                                           content: outcome.roundContent, toolCalls: calls))
+                let contentOffset = assistant.content.count
                 for call in calls {
                     activityStatus = "Running \(call.name)…"
 
@@ -588,7 +589,8 @@ public final class ConversationController {
                                                 arguments: call.arguments.jsonString,
                                                 result: result.content, isError: result.isError,
                                                 decision: decision, durationSeconds: duration,
-                                                imageData: result.imageData)
+                                                imageData: result.imageData,
+                                                contentOffset: contentOffset)
                     record.message = assistant
                     modelContext.insert(record)
                 }
@@ -628,6 +630,10 @@ public final class ConversationController {
                 activityStatus = nil
             }
             if !chunk.contentDelta.isEmpty {
+                // Text after a tool call starts a new paragraph rather than running on from the last round's.
+                if outcome.roundContent.isEmpty, !assistant.content.isEmpty, !assistant.content.hasSuffix("\n\n") {
+                    assistant.content += assistant.content.hasSuffix("\n") ? "\n" : "\n\n"
+                }
                 assistant.content += chunk.contentDelta
                 outcome.roundContent += chunk.contentDelta
             }

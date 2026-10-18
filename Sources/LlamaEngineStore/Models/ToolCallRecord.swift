@@ -26,6 +26,9 @@ public final class ToolCallRecord {
     /// A PNG a tool produced for the user (e.g. render_graphic), or nil. Shown in the chat and
     /// the inspector; the model itself only ever sees the text `result`.
     @Attribute(.externalStorage) public var imageData: Data?
+    /// How many characters of the reply's `content` came before this call, so a graphic can sit
+    /// where it was made. nil when unknown (Apple's on-device loop, replies from older versions).
+    public var contentOffset: Int?
     public var createdAt: Date = Date.now
 
     /// Inverse side of `ChatMessage.toolCallRecords`.
@@ -33,7 +36,7 @@ public final class ToolCallRecord {
 
     public init(toolName: String, arguments: String, result: String, isError: Bool,
                 decision: String = "auto", durationSeconds: Double? = nil,
-                imageData: Data? = nil, createdAt: Date = .now) {
+                imageData: Data? = nil, contentOffset: Int? = nil, createdAt: Date = .now) {
         self.id = UUID()
         self.toolName = toolName
         self.arguments = arguments
@@ -42,6 +45,7 @@ public final class ToolCallRecord {
         self.decision = decision
         self.durationSeconds = durationSeconds
         self.imageData = imageData
+        self.contentOffset = contentOffset
         self.createdAt = createdAt
     }
 }

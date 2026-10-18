@@ -84,6 +84,26 @@ final class ToolLoopTests: XCTestCase {
         XCTAssertFalse(controller.isStreaming)
     }
 
+    func testTextAroundAToolCallStaysApartAndTheCallKnowsWhereItRan() async throws {
+        let (context, session, assistant) = try fixture()
+        let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
+        let toolDelta = ToolCallDelta(index: 0, id: "c1", name: "current_datetime",
+                                      argumentsFragment: #"{"timezone":"UTC"}"#)
+        let backend = StubToolBackend([
+            [ChatChunk(contentDelta: "Here it is:", done: true, toolCallDeltas: [toolDelta])],
+            [ChatChunk(contentDelta: "**Anything else?**", done: true)]
+        ])
+        let base = ChatRequest(model: "qwen", messages: [ChatTurn(role: "user", content: "time?")],
+                               contextSize: 4096, tools: registry.specs)
+
+        await ConversationController().runToolLoop(backend: backend, baseRequest: base, baseTurns: base.messages,
+                                                   context: enabledContext(registry), into: assistant,
+                                                   session: session, rawPromptEstimate: 0, modelContext: context)
+
+        XCTAssertEqual(assistant.content, "Here it is:\n\n**Anything else?**")
+        XCTAssertEqual(assistant.orderedToolCallRecords.first?.contentOffset, "Here it is:".count)
+    }
+
     func testToolLoopWithNoToolCallsAnswersDirectly() async throws {
         let (context, session, assistant) = try fixture()
         let registry = ToolRegistry(tools: [CurrentDateTimeTool()])
